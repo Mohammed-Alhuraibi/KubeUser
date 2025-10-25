@@ -385,18 +385,42 @@ func (r *UserReconciler) updateUserStatus(ctx context.Context, user *authv1alpha
 // setActiveStatus sets the user status to active based on role assignments
 func (r *UserReconciler) setActiveStatus(user *authv1alpha1.User) {
 	user.Status.Phase = "Active"
-	roleCount := len(user.Spec.Roles)
-	clusterRoleCount := len(user.Spec.ClusterRoles)
-	totalRoles := roleCount + clusterRoleCount
+	
+	// Count different types of bindings
+	var namespacedRoles, namespacedClusterRoles int
+	for _, role := range user.Spec.Roles {
+		if role.ExistingRole != "" {
+			namespacedRoles++
+		} else if role.ExistingClusterRole != "" {
+			namespacedClusterRoles++
+		}
+	}
+	clusterWideRoles := len(user.Spec.ClusterRoles)
+	totalBindings := namespacedRoles + namespacedClusterRoles + clusterWideRoles
 
-	if totalRoles == 0 {
-		user.Status.Message = "User has no assigned roles"
-	} else if roleCount > 0 && clusterRoleCount > 0 {
-		user.Status.Message = fmt.Sprintf("User provisioned with %d namespace role(s) and %d cluster role(s)", roleCount, clusterRoleCount)
-	} else if roleCount > 0 {
-		user.Status.Message = fmt.Sprintf("User provisioned with %d namespace role(s)", roleCount)
+	if totalBindings == 0 {
+		user.Status.Message = "No role bindings configured"
+		return
+	}
+
+	// Build detailed message
+	var parts []string
+	if namespacedRoles > 0 {
+		parts = append(parts, fmt.Sprintf("%d namespace-scoped Role(s)", namespacedRoles))
+	}
+	if namespacedClusterRoles > 0 {
+		parts = append(parts, fmt.Sprintf("%d ClusterRole(s) bound to namespace(s)", namespacedClusterRoles))
+	}
+	if clusterWideRoles > 0 {
+		parts = append(parts, fmt.Sprintf("%d cluster-wide ClusterRole(s)", clusterWideRoles))
+	}
+
+	if len(parts) == 1 {
+		user.Status.Message = fmt.Sprintf("Active with %s", parts[0])
+	} else if len(parts) == 2 {
+		user.Status.Message = fmt.Sprintf("Active with %s and %s", parts[0], parts[1])
 	} else {
-		user.Status.Message = fmt.Sprintf("User provisioned with %d cluster role(s)", clusterRoleCount)
+		user.Status.Message = fmt.Sprintf("Active with %s, %s, and %s", parts[0], parts[1], parts[2])
 	}
 }
 
