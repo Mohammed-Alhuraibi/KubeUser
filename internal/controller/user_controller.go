@@ -385,7 +385,7 @@ func (r *UserReconciler) updateUserStatus(ctx context.Context, user *authv1alpha
 // setActiveStatus sets the user status to active based on role assignments
 func (r *UserReconciler) setActiveStatus(user *authv1alpha1.User) {
 	user.Status.Phase = "Active"
-	
+
 	// Count different types of bindings
 	var namespacedRoles, namespacedClusterRoles int
 	for _, role := range user.Spec.Roles {
