@@ -385,18 +385,42 @@ func (r *UserReconciler) updateUserStatus(ctx context.Context, user *authv1alpha
 // setActiveStatus sets the user status to active based on role assignments
 func (r *UserReconciler) setActiveStatus(user *authv1alpha1.User) {
 	user.Status.Phase = "Active"
-	roleCount := len(user.Spec.Roles)
-	clusterRoleCount := len(user.Spec.ClusterRoles)
-	totalRoles := roleCount + clusterRoleCount
 
-	if totalRoles == 0 {
-		user.Status.Message = "User has no assigned roles"
-	} else if roleCount > 0 && clusterRoleCount > 0 {
-		user.Status.Message = fmt.Sprintf("User provisioned with %d namespace role(s) and %d cluster role(s)", roleCount, clusterRoleCount)
-	} else if roleCount > 0 {
-		user.Status.Message = fmt.Sprintf("User provisioned with %d namespace role(s)", roleCount)
+	// Count different types of bindings
+	var namespacedRoles, namespacedClusterRoles int
+	for _, role := range user.Spec.Roles {
+		if role.ExistingRole != "" {
+			namespacedRoles++
+		} else if role.ExistingClusterRole != "" {
+			namespacedClusterRoles++
+		}
+	}
+	clusterWideRoles := len(user.Spec.ClusterRoles)
+	totalBindings := namespacedRoles + namespacedClusterRoles + clusterWideRoles
+
+	if totalBindings == 0 {
+		user.Status.Message = "No role bindings configured"
+		return
+	}
+
+	// Build detailed message
+	var parts []string
+	if namespacedRoles > 0 {
+		parts = append(parts, fmt.Sprintf("%d namespace-scoped Role(s)", namespacedRoles))
+	}
+	if namespacedClusterRoles > 0 {
+		parts = append(parts, fmt.Sprintf("%d ClusterRole(s) bound to namespace(s)", namespacedClusterRoles))
+	}
+	if clusterWideRoles > 0 {
+		parts = append(parts, fmt.Sprintf("%d cluster-wide ClusterRole(s)", clusterWideRoles))
+	}
+
+	if len(parts) == 1 {
+		user.Status.Message = fmt.Sprintf("Active with %s", parts[0])
+	} else if len(parts) == 2 {
+		user.Status.Message = fmt.Sprintf("Active with %s and %s", parts[0], parts[1])
 	} else {
-		user.Status.Message = fmt.Sprintf("User provisioned with %d cluster role(s)", clusterRoleCount)
+		user.Status.Message = fmt.Sprintf("Active with %s, %s, and %s", parts[0], parts[1], parts[2])
 	}
 }
 
@@ -414,15 +438,36 @@ func (r *UserReconciler) reconcileRoleBindings(ctx context.Context, user *authv1
 	// Create a map of desired RoleBindings (namespace:role -> RoleSpec)
 	desiredRBs := make(map[string]authv1alpha1.RoleSpec)
 	for _, role := range user.Spec.Roles {
-		// Validate that the Role exists
-		var roleObj rbacv1.Role
-		if err := r.Get(ctx, types.NamespacedName{Name: role.ExistingRole, Namespace: role.Namespace}, &roleObj); err != nil {
-			if apierrors.IsNotFound(err) {
-				return fmt.Errorf("role %s not found in namespace %s", role.ExistingRole, role.Namespace)
-			}
-			return fmt.Errorf("failed to get role %s in namespace %s: %w", role.ExistingRole, role.Namespace, err)
+		// Validate that exactly one of ExistingRole or ExistingClusterRole is set
+		if role.ExistingRole == "" && role.ExistingClusterRole == "" {
+			return fmt.Errorf("either existingRole or existingClusterRole must be specified for namespace %s", role.Namespace)
 		}
-		key := fmt.Sprintf("%s:%s", role.Namespace, role.ExistingRole)
+		if role.ExistingRole != "" && role.ExistingClusterRole != "" {
+			return fmt.Errorf("cannot specify both existingRole and existingClusterRole for namespace %s", role.Namespace)
+		}
+
+		var key string
+		if role.ExistingRole != "" {
+			// Validate that the Role exists
+			var roleObj rbacv1.Role
+			if err := r.Get(ctx, types.NamespacedName{Name: role.ExistingRole, Namespace: role.Namespace}, &roleObj); err != nil {
+				if apierrors.IsNotFound(err) {
+					return fmt.Errorf("role %s not found in namespace %s", role.ExistingRole, role.Namespace)
+				}
+				return fmt.Errorf("failed to get role %s in namespace %s: %w", role.ExistingRole, role.Namespace, err)
+			}
+			key = fmt.Sprintf("%s:%s", role.Namespace, role.ExistingRole)
+		} else {
+			// Validate that the ClusterRole exists
+			var clusterRoleObj rbacv1.ClusterRole
+			if err := r.Get(ctx, types.NamespacedName{Name: role.ExistingClusterRole}, &clusterRoleObj); err != nil {
+				if apierrors.IsNotFound(err) {
+					return fmt.Errorf("clusterrole %s not found", role.ExistingClusterRole)
+				}
+				return fmt.Errorf("failed to get clusterrole %s: %w", role.ExistingClusterRole, err)
+			}
+			key = fmt.Sprintf("%s:%s", role.Namespace, role.ExistingClusterRole)
+		}
 		desiredRBs[key] = role
 	}
 
@@ -436,7 +481,17 @@ func (r *UserReconciler) reconcileRoleBindings(ctx context.Context, user *authv1
 
 	// Create or update desired RoleBindings
 	for key, roleSpec := range desiredRBs {
-		rbName := fmt.Sprintf("%s-%s-rb", username, roleSpec.ExistingRole)
+		// Determine role name and kind
+		var roleName, roleKind string
+		if roleSpec.ExistingRole != "" {
+			roleName = roleSpec.ExistingRole
+			roleKind = "Role"
+		} else {
+			roleName = roleSpec.ExistingClusterRole
+			roleKind = "ClusterRole"
+		}
+
+		rbName := fmt.Sprintf("%s-%s-rb", username, roleName)
 		desiredRB := &rbacv1.RoleBinding{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      rbName,
@@ -456,8 +511,8 @@ func (r *UserReconciler) reconcileRoleBindings(ctx context.Context, user *authv1
 			}},
 			RoleRef: rbacv1.RoleRef{
 				APIGroup: "rbac.authorization.k8s.io",
-				Kind:     "Role",
-				Name:     roleSpec.ExistingRole,
+				Kind:     roleKind,
+				Name:     roleName,
 			},
 		}
 

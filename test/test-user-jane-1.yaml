@@ -4,7 +4,9 @@ metadata:
   name: jane
 spec:
   roles:
+    # - namespace: dev
+    #   existingRole: developer
     - namespace: dev
-      existingRole: developer
+      existingClusterRole: edit
   clusterRoles:
-    - existingClusterRole: edit
+    - existingClusterRole: view

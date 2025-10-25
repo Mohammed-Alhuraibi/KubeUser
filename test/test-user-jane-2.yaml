@@ -7,4 +7,4 @@ spec:
     - namespace: dev
       existingRole: tester
   clusterRoles:
-    - existingClusterRole: view
+    - existingClusterRole: edit

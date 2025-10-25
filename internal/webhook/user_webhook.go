@@ -57,22 +57,50 @@ func (w *UserWebhook) Handle(ctx context.Context, req admission.Request) admissi
 	return admission.Allowed("User resource validation successful")
 }
 
-// validateRoles checks that all referenced Roles exist in their respective namespaces
+// validateRoles checks that all referenced Roles or ClusterRoles exist in their respective namespaces
 func (w *UserWebhook) validateRoles(ctx context.Context, roles []authv1alpha1.RoleSpec) error {
 	for _, roleSpec := range roles {
-		var role rbacv1.Role
-		err := w.Get(ctx, types.NamespacedName{
-			Name:      roleSpec.ExistingRole,
-			Namespace: roleSpec.Namespace,
-		}, &role)
+		// Validate that exactly one of ExistingRole or ExistingClusterRole is set
+		if roleSpec.ExistingRole == "" && roleSpec.ExistingClusterRole == "" {
+			return fmt.Errorf("either existingRole or existingClusterRole must be specified for namespace '%s'",
+				roleSpec.Namespace)
+		}
+		if roleSpec.ExistingRole != "" && roleSpec.ExistingClusterRole != "" {
+			return fmt.Errorf("cannot specify both existingRole and existingClusterRole for namespace '%s'",
+				roleSpec.Namespace)
+		}
 
-		if err != nil {
-			if apierrors.IsNotFound(err) {
-				return fmt.Errorf("role '%s' not found in namespace '%s'",
-					roleSpec.ExistingRole, roleSpec.Namespace)
+		if roleSpec.ExistingRole != "" {
+			// Validate namespace-scoped Role
+			var role rbacv1.Role
+			err := w.Get(ctx, types.NamespacedName{
+				Name:      roleSpec.ExistingRole,
+				Namespace: roleSpec.Namespace,
+			}, &role)
+
+			if err != nil {
+				if apierrors.IsNotFound(err) {
+					return fmt.Errorf("role '%s' not found in namespace '%s'",
+						roleSpec.ExistingRole, roleSpec.Namespace)
+				}
+				return fmt.Errorf("failed to validate role '%s' in namespace '%s': %w",
+					roleSpec.ExistingRole, roleSpec.Namespace, err)
 			}
-			return fmt.Errorf("failed to validate role '%s' in namespace '%s': %w",
-				roleSpec.ExistingRole, roleSpec.Namespace, err)
+		} else {
+			// Validate ClusterRole (will be bound with RoleBinding)
+			var clusterRole rbacv1.ClusterRole
+			err := w.Get(ctx, types.NamespacedName{
+				Name: roleSpec.ExistingClusterRole,
+			}, &clusterRole)
+
+			if err != nil {
+				if apierrors.IsNotFound(err) {
+					return fmt.Errorf("clusterrole '%s' not found",
+						roleSpec.ExistingClusterRole)
+				}
+				return fmt.Errorf("failed to validate clusterrole '%s': %w",
+					roleSpec.ExistingClusterRole, err)
+			}
 		}
 	}
 	return nil

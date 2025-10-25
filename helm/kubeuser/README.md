@@ -74,11 +74,29 @@ metadata:
   name: alice
 spec:
   roles:
+    # Bind a namespace-scoped Role
     - namespace: "development"
       existingRole: "developer"
     - namespace: "staging"
       existingRole: "viewer"
-  expiry: "30d"
+```
+
+### User with ClusterRole in Specific Namespaces
+
+Bind a ClusterRole with RoleBinding to grant permissions only in specific namespaces:
+
+```yaml
+apiVersion: auth.openkube.io/v1alpha1
+kind: User
+metadata:
+  name: bob
+spec:
+  roles:
+    # Bind ClusterRole 'view' with RoleBinding in specific namespaces
+    - namespace: "team-a"
+      existingClusterRole: "view"
+    - namespace: "team-b"
+      existingClusterRole: "edit"
 ```
 
 ### User with Cluster-wide Access
@@ -87,11 +105,33 @@ spec:
 apiVersion: auth.openkube.io/v1alpha1
 kind: User
 metadata:
-  name: bob-admin
+  name: charlie-admin
 spec:
   clusterRoles:
+    # Bind ClusterRole with ClusterRoleBinding for cluster-wide access
     - existingClusterRole: "cluster-admin"
-  expiry: "7d"
+```
+
+### Mixed Permissions
+
+Combine namespace-scoped and cluster-wide permissions:
+
+```yaml
+apiVersion: auth.openkube.io/v1alpha1
+kind: User
+metadata:
+  name: dave
+spec:
+  roles:
+    # Namespace-scoped Role
+    - namespace: "production"
+      existingRole: "deployer"
+    # ClusterRole bound to specific namespace
+    - namespace: "monitoring"
+      existingClusterRole: "view"
+  clusterRoles:
+    # Cluster-wide access
+    - existingClusterRole: "cluster-reader"
 ```
 
 ## Upgrading

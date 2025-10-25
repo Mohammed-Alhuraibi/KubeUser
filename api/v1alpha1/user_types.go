@@ -8,15 +8,21 @@ import (
 // Spec types
 //
 
-// RoleSpec defines namespace-scoped access by binding to an existing Role
+// RoleSpec defines namespace-scoped access by binding to an existing Role or ClusterRole
 type RoleSpec struct {
 	// Namespace where the RoleBinding will be created
 	// +kubebuilder:validation:MinLength=1
 	Namespace string `json:"namespace"`
 
 	// ExistingRole is the name of the Role inside that namespace
-	// +kubebuilder:validation:MinLength=1
-	ExistingRole string `json:"existingRole"`
+	// Mutually exclusive with ExistingClusterRole
+	// +optional
+	ExistingRole string `json:"existingRole,omitempty"`
+
+	// ExistingClusterRole is the name of a ClusterRole to bind with a RoleBinding in the namespace
+	// Mutually exclusive with ExistingRole
+	// +optional
+	ExistingClusterRole string `json:"existingClusterRole,omitempty"`
 }
 
 // ClusterRoleSpec defines cluster-wide access by binding to an existing ClusterRole

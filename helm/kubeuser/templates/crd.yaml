@@ -79,19 +79,23 @@ spec:
                 description: Roles is a list of namespace-scoped Role bindings
                 items:
                   description: RoleSpec defines namespace-scoped access by binding
-                    to an existing Role
+                    to an existing Role or ClusterRole
                   properties:
+                    existingClusterRole:
+                      description: |-
+                        ExistingClusterRole is the name of a ClusterRole to bind with a RoleBinding in the namespace
+                        Mutually exclusive with ExistingRole
+                      type: string
                     existingRole:
-                      description: ExistingRole is the name of the Role inside that
-                        namespace
-                      minLength: 1
+                      description: |-
+                        ExistingRole is the name of the Role inside that namespace
+                        Mutually exclusive with ExistingClusterRole
                       type: string
                     namespace:
                       description: Namespace where the RoleBinding will be created
                       minLength: 1
                       type: string
                   required:
-                  - existingRole
                   - namespace
                   type: object
                 type: array
