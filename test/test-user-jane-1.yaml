@@ -5,6 +5,6 @@ metadata:
 spec:
   roles:
     - namespace: dev
-      existingRole: developer
+      existingClusterRole: edit
   clusterRoles:
-    - existingClusterRole: edit
+    - existingClusterRole: view

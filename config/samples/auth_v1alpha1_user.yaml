@@ -6,4 +6,17 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: user-sample
 spec:
-  # TODO(user): Add fields here
+  # Namespace-scoped role bindings
+  roles:
+    # Bind a namespace-scoped Role
+    - namespace: "development"
+      existingRole: "developer"
+    # Bind a ClusterRole with RoleBinding (namespace-scoped permissions)
+    - namespace: "staging"
+      existingClusterRole: "view"
+    - namespace: "production"
+      existingClusterRole: "edit"
+  
+  # Cluster-wide ClusterRole bindings
+  clusterRoles:
+    - existingClusterRole: "cluster-admin"

@@ -414,15 +414,36 @@ func (r *UserReconciler) reconcileRoleBindings(ctx context.Context, user *authv1
 	// Create a map of desired RoleBindings (namespace:role -> RoleSpec)
 	desiredRBs := make(map[string]authv1alpha1.RoleSpec)
 	for _, role := range user.Spec.Roles {
-		// Validate that the Role exists
-		var roleObj rbacv1.Role
-		if err := r.Get(ctx, types.NamespacedName{Name: role.ExistingRole, Namespace: role.Namespace}, &roleObj); err != nil {
-			if apierrors.IsNotFound(err) {
-				return fmt.Errorf("role %s not found in namespace %s", role.ExistingRole, role.Namespace)
-			}
-			return fmt.Errorf("failed to get role %s in namespace %s: %w", role.ExistingRole, role.Namespace, err)
+		// Validate that exactly one of ExistingRole or ExistingClusterRole is set
+		if role.ExistingRole == "" && role.ExistingClusterRole == "" {
+			return fmt.Errorf("either existingRole or existingClusterRole must be specified for namespace %s", role.Namespace)
 		}
-		key := fmt.Sprintf("%s:%s", role.Namespace, role.ExistingRole)
+		if role.ExistingRole != "" && role.ExistingClusterRole != "" {
+			return fmt.Errorf("cannot specify both existingRole and existingClusterRole for namespace %s", role.Namespace)
+		}
+
+		var key string
+		if role.ExistingRole != "" {
+			// Validate that the Role exists
+			var roleObj rbacv1.Role
+			if err := r.Get(ctx, types.NamespacedName{Name: role.ExistingRole, Namespace: role.Namespace}, &roleObj); err != nil {
+				if apierrors.IsNotFound(err) {
+					return fmt.Errorf("role %s not found in namespace %s", role.ExistingRole, role.Namespace)
+				}
+				return fmt.Errorf("failed to get role %s in namespace %s: %w", role.ExistingRole, role.Namespace, err)
+			}
+			key = fmt.Sprintf("%s:%s", role.Namespace, role.ExistingRole)
+		} else {
+			// Validate that the ClusterRole exists
+			var clusterRoleObj rbacv1.ClusterRole
+			if err := r.Get(ctx, types.NamespacedName{Name: role.ExistingClusterRole}, &clusterRoleObj); err != nil {
+				if apierrors.IsNotFound(err) {
+					return fmt.Errorf("clusterrole %s not found", role.ExistingClusterRole)
+				}
+				return fmt.Errorf("failed to get clusterrole %s: %w", role.ExistingClusterRole, err)
+			}
+			key = fmt.Sprintf("%s:%s", role.Namespace, role.ExistingClusterRole)
+		}
 		desiredRBs[key] = role
 	}
 
@@ -436,7 +457,17 @@ func (r *UserReconciler) reconcileRoleBindings(ctx context.Context, user *authv1
 
 	// Create or update desired RoleBindings
 	for key, roleSpec := range desiredRBs {
-		rbName := fmt.Sprintf("%s-%s-rb", username, roleSpec.ExistingRole)
+		// Determine role name and kind
+		var roleName, roleKind string
+		if roleSpec.ExistingRole != "" {
+			roleName = roleSpec.ExistingRole
+			roleKind = "Role"
+		} else {
+			roleName = roleSpec.ExistingClusterRole
+			roleKind = "ClusterRole"
+		}
+
+		rbName := fmt.Sprintf("%s-%s-rb", username, roleName)
 		desiredRB := &rbacv1.RoleBinding{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      rbName,
@@ -456,8 +487,8 @@ func (r *UserReconciler) reconcileRoleBindings(ctx context.Context, user *authv1
 			}},
 			RoleRef: rbacv1.RoleRef{
 				APIGroup: "rbac.authorization.k8s.io",
-				Kind:     "Role",
-				Name:     roleSpec.ExistingRole,
+				Kind:     roleKind,
+				Name:     roleName,
 			},
 		}
 
