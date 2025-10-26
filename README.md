@@ -2,27 +2,14 @@
 
 Lightweight Kubernetes-native user management operator that simplifies user authentication and authorization through declarative custom resources.
 
-## 🚀 Project Overview
+## Overview
 
-KubeUser is a Kubernetes operator that automates user management by providing a declarative API for creating and managing user access to Kubernetes clusters. It streamlines the process of granting temporary or permanent access to users through role-based access control (RBAC).
+KubeUser automates Kubernetes user management through declarative custom resources. It handles certificate generation, RBAC binding, and kubeconfig creation automatically.
 
 ### Why KubeUser?
 
-- **Declarative User Management**: Define users and their permissions using Kubernetes custom resources
-- **Certificate Expiry**: Automatically tracks and manages certificate expiration
-- **Certificate-based Authentication**: Automatically generates client certificates and kubeconfig files
-- **RBAC Integration**: Seamlessly integrates with existing Kubernetes Role and ClusterRole resources
-- **Kubernetes Native**: Built using controller-runtime, following Kubernetes best practices
-- **Multi-tenancy Support**: Namespace-scoped and cluster-wide permission management
+Kubernetes-native user management - no certificate handling , no Keycloak required.
 
-### Main Use Cases
-
-1. **Developer Onboarding**: Quickly grant new developers access to specific namespaces
-2. **Certificate Management**: Automatic certificate generation and expiration handling
-3. **Audit and Compliance**: Centralized user management with clear access tracking
-4. **GitOps Integration**: Manage user permissions through version-controlled YAML files
-
-## 🏗️ Architecture & Features
 
 ### Architecture Overview
 
@@ -41,25 +28,56 @@ KubeUser follows the standard Kubernetes operator pattern:
                        └─────────────────┘
 ```
 
-#### 🚧 implemented Features
-- [X] Reconciliation Loop: Continuous monitoring and enforcement of user permissions
-- [X] Finalizers: Proper cleanup of user resources when User objects are deleted
-- [X] Certificate Management: Automatic generation of client certificates using Kubernetes CSR API
-- [X] Kubeconfig Generation: Creates ready-to-use kubeconfig files stored as secrets
-- [X] RBAC Integration: Creates RoleBindings and ClusterRoleBindings based on User spec
-- [X] Role Validation: Validates that referenced Roles and ClusterRoles exist
-- [X] Webhook validation for User resources
-- [X] Certificate rotation and renewal (30 days before expiry)
-- [X] High availability: support for multi-replica deployments
-- [X] Health Checks: Liveness and readiness probes for robust deployments
+### Quick installation
+```bash
+# Install cert-manager
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.13.0/cert-manager.yaml
+# Wait for cert-manager to be ready
+kubectl wait --for=condition=ready pod -l app=cert-manager -n cert-manager --timeout=60s
+```
+```bash
+helm repo add kubeuser https://openkube-hub.github.io/KubeUser
+export KUBERNETES_API_SERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
 
+helm install kubeuser kubeuser/kubeuser -n kubeuser --create-namespace \
+  --set env.KUBERNETES_API_SERVER="$KUBERNETES_API_SERVER"
+  
+# verify installation
+kubectl get pods -n kubeuser
+
+```
+
+## Security Considerations
+**Deleting a User does NOT invalidate issued ceriticates.**
+
+When deleting a User:
+- RBAC bindings removed immediately (no permissions)
+- secrets deleted
+- Certificated remain valid until expiry (~1 year)
+
+#### 🚧 implemented Features
+- [X] Declarative User CRD with status tracking and finalizers
+- [X] Automatic client certificate generation via Kubernetes CSR API
+- [X] Certificate rotation 30 days before expiry
+- [X] Kubeconfig generation stored as Kubernetes secrets
+- [X] Namespace-scoped Role bindings (Role + RoleBinding)
+- [X] Namespace-scoped ClusterRole bindings (ClusterRole + RoleBinding)
+- [X] Dynamic RBAC reconciliation with automatic cleanup
+- [X] Admission webhook validation with TLS/HTTPS
+- [X] Role/ClusterRole existence validation
+- [X] High availability with leader election
+- [X] Prometheus metrics endpoint (HTTPS :8443) with RBAC protection
+- [X] Health probes (liveness and readiness)
+- [X] Helm chart and Kustomize deployment options
 
 #### 🚧 Planned Features
-- [ ] **existingClusterRole implementation under user.roles**
-- [ ] **User group management with UserGroup crd**
-- [ ] **Templated Roles/clusterRoles**: Provide predefined reusable RBAC role templates for common use cases
-- [ ] Audit logging for user access changes
-- [ ] Metrics Endpoint: Prometheus-compatible metrics on port 8080
+- [ ] User Groups (UserGroup CRD)
+- [ ] User templates and bulk operations
+- [ ] Predefined role templates library
+- [ ] Certificate revocation mechanism
+- [ ] OIDC, LDAP/AD, and SSO integration
+- [ ] Enhanced metrics with Grafana dashboards and Prometheus alerts
+- [ ] CLI tool and Web UI
 
 ## 📦 Installation Instructions
 
