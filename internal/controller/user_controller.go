@@ -57,7 +57,7 @@ type UserReconciler struct {
 // +kubebuilder:rbac:groups=auth.openkube.io,resources=users/finalizers,verbs=update
 // Core resources
 // +kubebuilder:rbac:groups="",resources=configmaps;secrets;serviceaccounts,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;create
+// +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods;replicasets,verbs=get;list;watch;create;update;patch;delete
 // Apps resources
@@ -134,14 +134,9 @@ func (r *UserReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		logger.Info("Finalizer already exists, skipping")
 	}
 
-	// Ensure user resources namespace
+	// Get user resources namespace (must exist)
 	userNamespace := getKubeUserNamespace()
-	logger.Info("Ensuring user resources namespace", "namespace", userNamespace)
-	if err := r.ensureNamespace(ctx, userNamespace); err != nil {
-		logger.Error(err, "Failed to ensure user resources namespace")
-		return ctrl.Result{}, err
-	}
-	logger.Info("User resources namespace ensured")
+	logger.Info("Using user resources namespace", "namespace", userNamespace)
 
 	// === Reconcile RoleBindings ===
 	logger.Info("Starting RoleBindings reconciliation", "rolesCount", len(user.Spec.Roles))
@@ -238,18 +233,6 @@ func getKubeUserNamespace() string {
 		namespace = "kubeuser" // fallback to default
 	}
 	return namespace
-}
-
-func (r *UserReconciler) ensureNamespace(ctx context.Context, name string) error {
-	var ns corev1.Namespace
-	if err := r.Get(ctx, types.NamespacedName{Name: name}, &ns); err != nil {
-		if apierrors.IsNotFound(err) {
-			ns = corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
-			return r.Create(ctx, &ns)
-		}
-		return err
-	}
-	return nil
 }
 
 func (r *UserReconciler) createOrUpdate(ctx context.Context, obj client.Object) error {
@@ -676,6 +659,15 @@ func (r *UserReconciler) ensureCertKubeconfig(ctx context.Context, user *authv1a
 	keySecretName := fmt.Sprintf("%s-key", username)
 	cfgSecretName := fmt.Sprintf("%s-kubeconfig", username)
 	csrName := fmt.Sprintf("%s-csr", username)
+
+	// Verify that the target namespace exists
+	var ns corev1.Namespace
+	if err := r.Get(ctx, types.NamespacedName{Name: userNamespace}, &ns); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, fmt.Errorf("target namespace '%s' does not exist - please create it before deploying KubeUser or use Helm with --create-namespace", userNamespace)
+		}
+		return false, fmt.Errorf("failed to verify namespace '%s': %w", userNamespace, err)
+	}
 
 	// Check if certificate needs rotation (30 days before expiry)
 	rotationThreshold := 30 * 24 * time.Hour

@@ -16,24 +16,29 @@ This Helm chart deploys the KubeUser operator, a Kubernetes-native user manageme
 # Add the chart repository (if published)
 helm repo add kubeuser https://charts.example.com/kubeuser
 
-# Install with default values
-helm install kubeuser ./helm/kubeuser
+# Install with automatic namespace creation (recommended)
+helm install kubeuser ./helm/kubeuser --create-namespace -n kubeuser
 
-# Install with custom namespace (following user preference)
-helm install kubeuser ./helm/kubeuser \
-  --set global.namespace=kubeuser \
-  --set global.environment=test \
-  --set global.nameSuffix=-kubeuser
+# Or install into existing namespace
+helm install kubeuser ./helm/kubeuser -n existing-namespace
 ```
+
+**Important**: 
+- Everything (controller + user secrets) goes in the same namespace specified by `-n`
+- Use `--create-namespace` for new namespaces or ensure the namespace exists first
 
 ### Custom Installation
 
 ```bash
-# Install with custom configuration
+# Install with custom configuration and namespace creation
 helm install kubeuser ./helm/kubeuser \
+  --create-namespace -n kubeuser \
   --set image.tag=v0.2.0 \
   --set webhook.enabled=true \
-  --set metrics.enabled=true \
+  --set metrics.enabled=true
+
+# Install into existing namespace
+helm install kubeuser ./helm/kubeuser -n my-existing-namespace
 ```
 
 ## Configuration
@@ -42,13 +47,10 @@ The following table lists the configurable parameters and their default values:
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `global.namespace` | Target namespace for deployment | `kubeuser` |
-| `global.environment` | Environment label | `test` |
-| `global.nameSuffix` | Suffix for namespace name | `-kubeuser` |
-| `image.repository` | Controller image repository | `kubeuser-controller` |
+| `image.repository` | Controller image repository | `ghcr.io/openkube-hub/kubeuser-controller` |
 | `image.tag` | Controller image tag | `latest` |
 | `image.pullPolicy` | Image pull policy | `IfNotPresent` |
-| `replicaCount` | Number of controller replicas | `1` |
+| `replicaCount` | Number of controller replicas | `2` |
 | `resources.limits.cpu` | CPU limit | `500m` |
 | `resources.limits.memory` | Memory limit | `128Mi` |
 | `resources.requests.cpu` | CPU request | `10m` |

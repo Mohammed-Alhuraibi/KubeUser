@@ -39,13 +39,15 @@ kubectl wait --for=condition=ready pod -l app=cert-manager -n cert-manager --tim
 helm repo add kubeuser https://openkube-hub.github.io/KubeUser
 export KUBERNETES_API_SERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
 
-helm install kubeuser kubeuser/kubeuser -n kubeuser --create-namespace \
+# Install with automatic namespace creation (recommended)
+helm install kubeuser kubeuser/kubeuser --create-namespace -n kubeuser \
   --set env.KUBERNETES_API_SERVER="$KUBERNETES_API_SERVER"
   
 # verify installation
 kubectl get pods -n kubeuser
-
 ```
+
+**Important**: The controller requires a namespace for storing user certificates. Use `--create-namespace` or install into an existing namespace. The controller will NOT automatically create namespaces for GitOps compatibility.
 
 ## Security Considerations
 **Deleting a User does NOT invalidate issued ceriticates.**
@@ -111,10 +113,16 @@ KubeUser publishes Helm charts via GitHub Pages. To install using Helm:
 helm repo add kubeuser https://openkube-hub.github.io/KubeUser
 helm repo update
 
-# Install a specific released version (recommended)
+```bash
+# Install with automatic namespace creation (recommended)
 helm upgrade --install kubeuser kubeuser/kubeuser \
-  --namespace kubeuser \
   --create-namespace \
+  --namespace kubeuser \
+  --version <version>
+
+# Or install into existing namespace
+helm upgrade --install kubeuser kubeuser/kubeuser \
+  --namespace existing-namespace \
   --version <version>
 
 # List available versions
@@ -137,6 +145,9 @@ Notes:
 # Clone the repository
 git clone https://github.com/openkube-hub/KubeUser.git
 cd KubeUser
+
+# Create namespace first (required)
+kubectl create namespace kubeuser
 
 # Deploy using kustomize
 kubectl apply -k config/default
@@ -324,13 +335,22 @@ This script tests:
 
 ## ⚙️ Configuration
 
+### Breaking Change Notice
+
+**v0.3.0+**: The controller no longer automatically creates namespaces. This change improves GitOps compatibility by ensuring all resources are explicitly declared. 
+
+**Migration**: If upgrading from an earlier version, ensure your target namespace exists before deployment:
+- **Helm**: Use `--create-namespace` flag
+- **Kustomize**: Namespace is included in manifests
+- **Manual**: Create namespace with `kubectl create namespace <name>`
+
 ### Environment Variables
 
 The operator supports the following environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `KUBERNETES_API_SERVER` | `https://kubernetes.default.svc` | Kubernetes api address |
+| `KUBERNETES_API_SERVER` | `https://kubernetes.default.svc` | Kubernetes API server address |
 
 ## 🔧 Troubleshooting
 
@@ -384,8 +404,14 @@ kubectl get validatingwebhookconfiguration kubeuser-validating-webhook-configura
 
 **Common causes:**
 - Referenced roles don't exist
+- Target namespace doesn't exist (controller no longer auto-creates namespaces)
 - RBAC permission issues
 - Webhook validation failures
+
+**Namespace Issues:**
+If you see errors about missing namespaces, ensure you:
+- Used `--create-namespace` with Helm installation
+- Pre-created the namespace for Kustomize deployments
 
 #### Certificate Generation Issues
 

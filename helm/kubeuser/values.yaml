@@ -9,8 +9,7 @@ fullnameOverride: ""
 
 # Global settings
 global:
-  # Namespace configuration
-  namespace: kubeuser
+  # Common suffix for resource names (optional)
   nameSuffix: ""
 
 # Image configuration
@@ -111,6 +110,7 @@ metrics:
 
 # Environment variables
 env:
+  # Kubernetes API server endpoint
   KUBERNETES_API_SERVER: "https://kubernetes.default.svc"
 
 # RBAC configuration

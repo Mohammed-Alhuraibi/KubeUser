@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ include "kubeuser.fullname" . }}-controller-manager
-  namespace: {{ include "kubeuser.namespace" . }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "kubeuser.managerLabels" . | nindent 4 }}
   {{- with .Values.podLabels }}
@@ -47,7 +47,7 @@ spec:
         - name: WEBHOOK_SERVICE_NAME
           value: {{ include "kubeuser.fullname" . }}-webhook-service
         - name: KUBEUSER_NAMESPACE
-          value: {{ include "kubeuser.namespace" . }}
+          value: {{ .Release.Namespace }}
         {{- with .Values.env }}
         {{- range $key, $value := . }}
         - name: {{ $key }}
