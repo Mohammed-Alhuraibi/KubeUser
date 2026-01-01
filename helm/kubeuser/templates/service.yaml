@@ -4,7 +4,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: {{ include "kubeuser.fullname" . }}-webhook-service
-  namespace: {{ include "kubeuser.namespace" . }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "kubeuser.labels" . | nindent 4 }}
     app.kubernetes.io/component: webhook
@@ -25,7 +25,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: {{ include "kubeuser.fullname" . }}-metrics-service
-  namespace: {{ include "kubeuser.namespace" . }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "kubeuser.managerLabels" . | nindent 4 }}
 spec:

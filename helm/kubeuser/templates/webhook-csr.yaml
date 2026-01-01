@@ -9,14 +9,14 @@ metadata:
     {{- include "kubeuser.labels" . | nindent 4 }}
   annotations:
     # cert-manager will inject the CA bundle automatically
-    cert-manager.io/inject-ca-from: {{ include "kubeuser.namespace" . }}/{{ include "kubeuser.fullname" . }}-webhook-cert
+    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ include "kubeuser.fullname" . }}-webhook-cert
 webhooks:
 - admissionReviewVersions:
   - v1
   clientConfig:
     service:
       name: {{ include "kubeuser.fullname" . }}-webhook-service
-      namespace: {{ include "kubeuser.namespace" . }}
+      namespace: {{ .Release.Namespace }}
       path: /validate-auth-openkube-io-v1alpha1-user
     # caBundle will be injected automatically by cert-manager
   failurePolicy: {{ .Values.webhook.failurePolicy | default "Fail" }}

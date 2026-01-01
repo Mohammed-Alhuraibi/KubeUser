@@ -2,7 +2,7 @@
 
 🚀 Deployment Details:
    - Release Name: {{ .Release.Name }}
-   - Namespace: {{ include "kubeuser.namespace" . }}
+   - Namespace: {{ .Release.Namespace }}
    - Chart Version: {{ .Chart.Version }}
    - App Version: {{ .Chart.AppVersion }}
 
@@ -23,7 +23,7 @@
 📋 Next Steps:
 
 1. Check the operator deployment status:
-   kubectl get deployment {{ include "kubeuser.fullname" . }}-controller-manager -n {{ include "kubeuser.namespace" . }}
+   kubectl get deployment {{ include "kubeuser.fullname" . }}-controller-manager -n {{ .Release.Namespace }}
 
 2. Verify the CRD is installed:
    kubectl get crd users.auth.openkube.io

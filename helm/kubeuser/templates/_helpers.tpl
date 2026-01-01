@@ -65,17 +65,6 @@ Create the name of the service account to use
 {{- end }}
 
 {{/*
-Create the namespace to use (with suffix if specified)
-*/}}
-{{- define "kubeuser.namespace" -}}
-{{- if .Values.global.nameSuffix }}
-{{- printf "%s%s" .Values.global.namespace .Values.global.nameSuffix }}
-{{- else }}
-{{- .Values.global.namespace }}
-{{- end }}
-{{- end }}
-
-{{/*
 Create manager labels for controller-manager
 */}}
 {{- define "kubeuser.managerLabels" -}}

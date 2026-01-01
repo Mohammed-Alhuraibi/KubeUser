@@ -161,7 +161,7 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: {{ include "kubeuser.serviceAccountName" . }}
-  namespace: {{ include "kubeuser.namespace" . }}
+  namespace: {{ .Release.Namespace }}
 
 ---
 # permissions to do leader election.
@@ -169,7 +169,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: {{ include "kubeuser.fullname" . }}-leader-election-role
-  namespace: {{ include "kubeuser.namespace" . }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "kubeuser.labels" . | nindent 4 }}
 rules:
@@ -210,7 +210,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: {{ include "kubeuser.fullname" . }}-leader-election-rolebinding
-  namespace: {{ include "kubeuser.namespace" . }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "kubeuser.labels" . | nindent 4 }}
 roleRef:
@@ -220,7 +220,7 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: {{ include "kubeuser.serviceAccountName" . }}
-  namespace: {{ include "kubeuser.namespace" . }}
+  namespace: {{ .Release.Namespace }}
 
 {{- if .Values.metrics.enabled }}
 ---
@@ -258,7 +258,7 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: {{ include "kubeuser.serviceAccountName" . }}
-  namespace: {{ include "kubeuser.namespace" . }}
+  namespace: {{ .Release.Namespace }}
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
