@@ -43,7 +43,7 @@ Client certificates for user authentication are managed through the Kubernetes C
 
 - **cert-manager**: Must be installed in your cluster
   ```bash
-  kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.13.0/cert-manager.yaml
+  kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.19.2/cert-manager.yaml
   ```
 
 ## Configuration

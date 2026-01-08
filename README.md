@@ -31,7 +31,7 @@ KubeUser follows the standard Kubernetes operator pattern:
 ### Quick installation
 ```bash
 # Install cert-manager
-kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.13.0/cert-manager.yaml
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.19.2/cert-manager.yaml
 # Wait for cert-manager to be ready
 kubectl wait --for=condition=ready pod -l app=cert-manager -n cert-manager --timeout=60s
 ```
@@ -97,7 +97,7 @@ KubeUser requires cert-manager for webhook certificate management:
 
 ```bash
 # Install cert-manager
-kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.13.0/cert-manager.yaml
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.19.2/cert-manager.yaml
 
 # Wait for cert-manager to be ready
 kubectl wait --for=condition=ready pod -l app=cert-manager -n cert-manager --timeout=60s
@@ -334,15 +334,6 @@ This script tests:
    ```
 
 ## ⚙️ Configuration
-
-### Breaking Change Notice
-
-**v0.3.0+**: The controller no longer automatically creates namespaces. This change improves GitOps compatibility by ensuring all resources are explicitly declared. 
-
-**Migration**: If upgrading from an earlier version, ensure your target namespace exists before deployment:
-- **Helm**: Use `--create-namespace` flag
-- **Kustomize**: Namespace is included in manifests
-- **Manual**: Create namespace with `kubectl create namespace <name>`
 
 ### Environment Variables
 

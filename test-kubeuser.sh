@@ -68,7 +68,7 @@ test_prerequisites() {
     if ! kubectl get namespace cert-manager >/dev/null 2>&1; then
         log_warning "cert-manager namespace not found"
         log_info "Installing cert-manager..."
-        kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.13.0/cert-manager.yaml
+        kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.19.2/cert-manager.yaml
         wait_for_condition "cert-manager pods to be ready" "kubectl get pods -n cert-manager | grep -E '1/1.*Running'"
     fi
     

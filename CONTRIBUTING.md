@@ -2,9 +2,6 @@
 
 Thank you for your interest in contributing to this project!
 
-At this stage, we are **not accepting pull requests** or direct code contributions.  
-If you’d like to help, please **submit an issue** instead.
-
 ## Reporting Issues
 - Use [GitHub Issues](../../issues) for bug reports, questions, or feature suggestions.
 - When reporting an issue, please include:
