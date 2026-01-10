@@ -28,7 +28,7 @@ KubeUser follows the standard Kubernetes operator pattern:
                        └─────────────────┘
 ```
 
-### Quick installation
+## Quick installation
 ```bash
 # Install cert-manager
 kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.19.2/cert-manager.yaml
@@ -74,7 +74,6 @@ When deleting a User:
 
 #### 🚧 Planned Features
 - [ ] User Groups (UserGroup CRD)
-- [ ] User templates and bulk operations
 - [ ] Predefined role templates library
 - [ ] Certificate revocation mechanism
 - [ ] OIDC, LDAP/AD, and SSO integration
@@ -234,9 +233,35 @@ spec:
       existingRole: "developer"
     - namespace: "testing"
       existingRole: "tester"
+    - namespace: "monitoring"
+      existingClusterRole: "view"  # Bind cluster role to specific namespace
   clusterRoles:
     - existingClusterRole: "view"  # Read-only cluster access
 ```
+
+### Using Existing Cluster Roles in Namespace Scope
+
+KubeUser supports binding existing cluster roles to specific namespaces, providing fine-grained access control:
+
+```yaml path=null start=null
+apiVersion: auth.openkube.io/v1alpha1
+kind: User
+metadata:
+  name: namespace-admin
+spec:
+  roles:
+    - namespace: "production"
+      existingClusterRole: "admin"  # Full admin access to production namespace only
+    - namespace: "staging"
+      existingClusterRole: "edit"   # Edit access to staging namespace only
+    - namespace: "development"
+      existingClusterRole: "view"   # Read-only access to development namespace
+```
+
+This approach allows you to:
+- Reuse well-defined cluster roles (admin, edit, view) in namespace-specific contexts
+- Maintain consistent permission sets across different namespaces
+- Avoid creating duplicate namespace-scoped roles
 
 ### Field Reference
 
@@ -244,9 +269,11 @@ spec:
 |-------|------|----------|-------------|
 | `spec.roles` | `[]RoleSpec` | No | List of namespace-scoped role bindings |
 | `spec.roles[].namespace` | `string` | Yes | Target namespace for the role binding |
-| `spec.roles[].existingRole` | `string` | Yes | Name of the existing Role in the namespace |
+| `spec.roles[].existingRole` | `string` | No* | Name of the existing Role in the namespace |
+| `spec.roles[].existingClusterRole` | `string` | No* | Name of the existing ClusterRole to bind to the namespace |
 | `spec.clusterRoles` | `[]ClusterRoleSpec` | No | List of cluster-wide role bindings |
 | `spec.clusterRoles[].existingClusterRole` | `string` | Yes | Name of the existing ClusterRole |
+
 
 ### Managing Users
 
