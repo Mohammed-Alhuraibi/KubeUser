@@ -118,7 +118,6 @@ rules:
   - update
   - watch
   - bind
-  - escalate
 # Grant permissions to bind any role/clusterrole (needed for user management)
 - apiGroups:
   - rbac.authorization.k8s.io
@@ -127,7 +126,6 @@ rules:
   - clusterroles
   verbs:
   - bind
-  - escalate
 - apiGroups:
   - rbac.authorization.k8s.io
   resources:
@@ -138,7 +136,6 @@ rules:
   - list
   - watch
   - bind
-  - escalate
 - apiGroups:
   - admissionregistration.k8s.io
   resources:
