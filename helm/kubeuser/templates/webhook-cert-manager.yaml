@@ -32,7 +32,7 @@ spec:
   - {{ include "kubeuser.fullname" . }}-webhook-service
   - {{ include "kubeuser.fullname" . }}-webhook-service.{{ .Release.Namespace }}
   - {{ include "kubeuser.fullname" . }}-webhook-service.{{ .Release.Namespace }}.svc
-  - {{ include "kubeuser.fullname" . }}-webhook-service.{{ .Release.Namespace }}.svc.cluster.local
+  - {{ include "kubeuser.fullname" . }}-webhook-service.{{ .Release.Namespace }}.svc.{{ .Values.env.CLUSTER_DOMAIN | default "cluster.local" }}
   # Duration and renewal
   duration: {{ .Values.webhook.certManager.duration | default "8760h" }}
   renewBefore: {{ .Values.webhook.certManager.renewBefore | default "2160h" }}
