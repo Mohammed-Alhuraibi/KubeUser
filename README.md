@@ -369,6 +369,7 @@ The operator supports the following environment variables:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `KUBERNETES_API_SERVER` | `https://kubernetes.default.svc` | Kubernetes API server address |
+| `CLUSTER_DOMAIN` | `cluster.local` | Kubernetes cluster DNS domain (change if your cluster uses a custom domain) |
 
 ## 🔧 Troubleshooting
 

@@ -154,6 +154,7 @@ metrics:
 # Environment variables
 env:
   KUBERNETES_API_SERVER: "https://kubernetes.default.svc"
+  CLUSTER_DOMAIN: "cluster.local"
   LOG_LEVEL: "info"
   ENABLE_PROFILING: "false"
   METRICS_ADDR: ":8080"
