@@ -112,6 +112,9 @@ metrics:
 env:
   # Kubernetes API server endpoint
   KUBERNETES_API_SERVER: "https://kubernetes.default.svc"
+  # Kubernetes cluster domain (default: cluster.local)
+  # Override this if your cluster uses a different domain
+  CLUSTER_DOMAIN: "cluster.local"
 
 # RBAC configuration
 rbac:
