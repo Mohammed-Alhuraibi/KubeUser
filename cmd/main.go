@@ -37,6 +37,7 @@ import (
 
 	authv1alpha1 "github.com/openkube-hub/KubeUser/api/v1alpha1"
 	"github.com/openkube-hub/KubeUser/internal/controller"
+	"github.com/openkube-hub/KubeUser/internal/validation"
 	webhookpkg "github.com/openkube-hub/KubeUser/internal/webhook"
 	// +kubebuilder:scaffold:imports
 )
@@ -87,6 +88,12 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	// Validate cluster domain configuration at startup
+	if err := validation.ValidateClusterDomain(setupLog); err != nil {
+		setupLog.Error(err, "cluster domain validation failed")
+		os.Exit(1)
+	}
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
