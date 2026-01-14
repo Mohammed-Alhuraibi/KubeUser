@@ -66,7 +66,9 @@ func validateDNSResolution(logger logr.Logger, clusterDomain string) error {
 	if err != nil {
 		return fmt.Errorf("DNS resolution failed for %s: %w. "+
 			"This indicates the CLUSTER_DOMAIN environment variable (%s) does not match your cluster's actual domain. "+
-			"Please verify your cluster domain with: kubectl run test-dns --rm -i --image=busybox -- nslookup kubernetes.default.svc",
+			"To find your cluster domain, try: "+
+			"1) kubectl get cm coredns -n kube-system -o yaml | grep 'cluster.local' (look for the domain) "+
+			"2) kubectl run test --rm -i --image=busybox -- nslookup kubernetes.default.svc.cluster.local (try common domains)",
 			testFQDN, err, clusterDomain)
 	}
 
