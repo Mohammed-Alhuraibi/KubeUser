@@ -45,6 +45,15 @@ const metricsServiceName = "kubeuser-controller-manager-metrics-service"
 // metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
 const metricsRoleBindingName = "kubeuser-metrics-binding"
 
+// getClusterDomain returns the cluster domain, defaulting to cluster.local
+func getClusterDomain() string {
+	domain := os.Getenv("CLUSTER_DOMAIN")
+	if domain == "" {
+		domain = "cluster.local"
+	}
+	return domain
+}
+
 var _ = Describe("Manager", Ordered, func() {
 	var controllerPodName string
 
@@ -212,6 +221,7 @@ var _ = Describe("Manager", Ordered, func() {
 			Eventually(verifyMetricsServerStarted).Should(Succeed())
 
 			By("creating the curl-metrics pod to access the metrics endpoint")
+			clusterDomain := getClusterDomain()
 			cmd = exec.Command("kubectl", "run", "curl-metrics", "--restart=Never",
 				"--namespace", namespace,
 				"--image=curlimages/curl:latest",
@@ -222,7 +232,7 @@ var _ = Describe("Manager", Ordered, func() {
 							"name": "curl",
 							"image": "curlimages/curl:latest",
 							"command": ["/bin/sh", "-c"],
-							"args": ["curl -v -k -H 'Authorization: Bearer %s' https://%s.%s.svc.cluster.local:8443/metrics"],
+							"args": ["curl -v -k -H 'Authorization: Bearer %s' https://%s.%s.svc.%s:8443/metrics"],
 							"securityContext": {
 								"readOnlyRootFilesystem": true,
 								"allowPrivilegeEscalation": false,
@@ -238,7 +248,7 @@ var _ = Describe("Manager", Ordered, func() {
 						}],
 						"serviceAccountName": "%s"
 					}
-				}`, token, metricsServiceName, namespace, serviceAccountName))
+				}`, token, metricsServiceName, namespace, clusterDomain, serviceAccountName))
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create curl-metrics pod")
 
