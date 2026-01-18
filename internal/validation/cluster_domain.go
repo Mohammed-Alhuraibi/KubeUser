@@ -28,6 +28,12 @@ import (
 
 // ValidateClusterDomain validates that the configured cluster domain matches the actual cluster configuration
 func ValidateClusterDomain(logger logr.Logger) error {
+	// Skip validation if running outside the cluster (local development)
+	if !isRunningInCluster() {
+		logger.Info("skipping cluster domain validation - running outside cluster")
+		return nil
+	}
+
 	clusterDomain := os.Getenv("CLUSTER_DOMAIN")
 	if clusterDomain == "" {
 		clusterDomain = "cluster.local" // default
@@ -49,6 +55,21 @@ func ValidateClusterDomain(logger logr.Logger) error {
 
 	logger.Info("cluster domain validation successful", "clusterDomain", clusterDomain)
 	return nil
+}
+
+// isRunningInCluster detects if the application is running inside a Kubernetes cluster
+func isRunningInCluster() bool {
+	// Check for service account token file (standard way to detect in-cluster execution)
+	if _, err := os.Stat("/var/run/secrets/kubernetes.io/serviceaccount/token"); err == nil {
+		return true
+	}
+
+	// Check for KUBERNETES_SERVICE_HOST environment variable (set by Kubernetes)
+	if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
+		return true
+	}
+
+	return false
 }
 
 // validateDNSResolution validates that the cluster domain resolves correctly
