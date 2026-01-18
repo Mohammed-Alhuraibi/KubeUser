@@ -110,6 +110,11 @@ build: manifests generate fmt vet ## Build manager binary.
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
+	@echo "Setting up local development environment..."
+	@if [ ! -f /tmp/k8s-webhook-server/serving-certs/tls.crt ]; then \
+		echo "Generating webhook certificates for local testing..."; \
+		bash hack/generate-local-certs.sh; \
+	fi
 	go run ./cmd/main.go
 
 # If you wish to build the manager image targeting other platforms you can use the --platform flag.
