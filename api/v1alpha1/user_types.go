@@ -32,8 +32,28 @@ type ClusterRoleSpec struct {
 	ExistingClusterRole string `json:"existingClusterRole"`
 }
 
+// AuthSpec defines authentication configuration for the user
+type AuthSpec struct {
+	// Type specifies the authentication method
+	// +kubebuilder:validation:Enum=x509;oidc
+	// +kubebuilder:default=x509
+	Type string `json:"type"`
+
+	// TTL specifies credential time-to-live (lifetime)
+	// For x509: certificate validity period (default: 3 months)
+	// For oidc: ignored (placeholder for future implementation)
+	// +optional
+	// +kubebuilder:validation:Pattern=^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+	// +kubebuilder:default="2160h"
+	TTL string `json:"ttl,omitempty"`
+}
+
 // UserSpec defines the desired state of User
 type UserSpec struct {
+	// Auth defines authentication configuration
+	// +optional
+	Auth AuthSpec `json:"auth,omitempty"`
+
 	// Roles is a list of namespace-scoped Role bindings
 	// +optional
 	Roles []RoleSpec `json:"roles,omitempty"`
@@ -53,6 +73,11 @@ type UserStatus struct {
 	// This comes from the actual certificate NotAfter time when available
 	// +optional
 	ExpiryTime string `json:"expiryTime,omitempty"`
+
+	// RenewalTime is when the certificate will be automatically renewed (RFC3339 format)
+	// This is calculated as ExpiryTime - RotationThreshold
+	// +optional
+	RenewalTime string `json:"renewalTime,omitempty"`
 
 	// CertificateExpiry indicates if the expiry time comes from actual certificate
 	// Values: "Certificate", "Calculated", "Unknown"
@@ -81,6 +106,7 @@ type UserStatus struct {
 // +kubebuilder:resource:scope=Cluster
 // +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase",description="Current phase of the user"
 // +kubebuilder:printcolumn:name="Expiry",type="string",JSONPath=".status.expiryTime",description="Certificate expiry time"
+// +kubebuilder:printcolumn:name="Renewal",type="string",JSONPath=".status.renewalTime",description="Certificate renewal time"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",description="Time since the user was created"
 // +kubebuilder:printcolumn:name="Message",type="string",JSONPath=".status.message",description="Status message",priority=1
 

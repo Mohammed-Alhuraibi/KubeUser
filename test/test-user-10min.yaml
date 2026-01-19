@@ -1,0 +1,13 @@
+# Test user with 10-minute TTL
+# Requires KUBEUSER_MIN_DURATION=10m environment variable to be set
+# Otherwise will fail validation (default minimum is 1 hour)
+apiVersion: auth.openkube.io/v1alpha1
+kind: User
+metadata:
+  name: jane
+spec:
+  auth:
+    type: x509
+    ttl: 10m
+  clusterRoles:
+    - existingClusterRole: edit

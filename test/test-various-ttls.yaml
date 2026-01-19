@@ -1,0 +1,34 @@
+# Test different TTL durations to show renewal time scaling
+---
+apiVersion: auth.openkube.io/v1alpha1
+kind: User
+metadata:
+  name: user-72h
+spec:
+  auth:
+    type: x509
+    ttl: 72h  # 3 days - renews when 18h remain
+  clusterRoles:
+    - existingClusterRole: view
+---
+apiVersion: auth.openkube.io/v1alpha1
+kind: User
+metadata:
+  name: user-30d
+spec:
+  auth:
+    type: x509
+    ttl: 720h  # 30 days - renews when 7.5 days remain
+  clusterRoles:
+    - existingClusterRole: view
+---
+apiVersion: auth.openkube.io/v1alpha1
+kind: User
+metadata:
+  name: user-1y
+spec:
+  auth:
+    type: x509
+    ttl: 8760h  # 1 year - renews when ~91 days remain
+  clusterRoles:
+    - existingClusterRole: view

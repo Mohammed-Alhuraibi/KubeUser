@@ -23,6 +23,10 @@ spec:
       jsonPath: .status.expiryTime
       name: Expiry
       type: string
+    - description: Certificate renewal time
+      jsonPath: .status.renewalTime
+      name: Renewal
+      type: string
     - description: Time since the user was created
       jsonPath: .metadata.creationTimestamp
       name: Age
@@ -57,6 +61,27 @@ spec:
           spec:
             description: UserSpec defines the desired state of User
             properties:
+              auth:
+                description: Auth defines authentication configuration
+                properties:
+                  ttl:
+                    default: 2160h
+                    description: |-
+                      TTL specifies credential time-to-live (lifetime)
+                      For x509: certificate validity period (default: 3 months)
+                      For oidc: ignored (placeholder for future implementation)
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                    type: string
+                  type:
+                    default: x509
+                    description: Type specifies the authentication method
+                    enum:
+                    - x509
+                    - oidc
+                    type: string
+                required:
+                - type
+                type: object
               clusterRoles:
                 description: ClusterRoles is a list of cluster-wide ClusterRole bindings
                 items:
@@ -174,6 +199,11 @@ spec:
               phase:
                 description: Phase is a simple high-level status (Pending, Active,
                   Expired, Error)
+                type: string
+              renewalTime:
+                description: |-
+                  RenewalTime is when the certificate will be automatically renewed (RFC3339 format)
+                  This is calculated as ExpiryTime - RotationThreshold
                 type: string
             type: object
         required:

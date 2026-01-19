@@ -37,6 +37,13 @@ const (
 )
 
 func EnsureCertKubeconfig(ctx context.Context, r client.Client, user *authv1alpha1.User) (bool, error) {
+	// Use default duration (3 months)
+	defaultDuration := 90 * 24 * time.Hour
+	return EnsureCertKubeconfigWithDuration(ctx, r, user, defaultDuration)
+}
+
+// EnsureCertKubeconfigWithDuration ensures certificate kubeconfig with custom duration
+func EnsureCertKubeconfigWithDuration(ctx context.Context, r client.Client, user *authv1alpha1.User, duration time.Duration) (bool, error) {
 	username := user.Name
 	userNamespace := helpers.GetKubeUserNamespace()
 	keySecretName := fmt.Sprintf("%s-key", username)
@@ -52,8 +59,10 @@ func EnsureCertKubeconfig(ctx context.Context, r client.Client, user *authv1alph
 		return false, fmt.Errorf("failed to verify namespace '%s': %w", userNamespace, err)
 	}
 
-	// Check if certificate needs rotation (30 days before expiry)
-	rotationThreshold := 30 * 24 * time.Hour
+	// Check if certificate needs rotation
+	// Rotation threshold can be configured via KUBEUSER_ROTATION_THRESHOLD environment variable
+	rotationThreshold := getRotationThreshold(duration)
+
 	needsRotation, err := checkCertificateRotation(ctx, r, cfgSecretName, rotationThreshold)
 	if err != nil {
 		return false, fmt.Errorf("failed to check certificate rotation: %w", err)
@@ -108,12 +117,16 @@ func EnsureCertKubeconfig(ctx context.Context, r client.Client, user *authv1alph
 	var csr certv1.CertificateSigningRequest
 	err = r.Get(ctx, types.NamespacedName{Name: csrName}, &csr)
 	if apierrors.IsNotFound(err) {
+		// Convert duration to seconds for CSR
+		expirationSeconds := int32(duration.Seconds())
+
 		csr = certv1.CertificateSigningRequest{
 			ObjectMeta: metav1.ObjectMeta{Name: csrName, Labels: map[string]string{"auth.openkube.io/user": username}},
 			Spec: certv1.CertificateSigningRequestSpec{
-				Request:    csrPEM,
-				Usages:     []certv1.KeyUsage{certv1.UsageClientAuth},
-				SignerName: certv1.KubeAPIServerClientSignerName,
+				Request:           csrPEM,
+				Usages:            []certv1.KeyUsage{certv1.UsageClientAuth},
+				SignerName:        certv1.KubeAPIServerClientSignerName,
+				ExpirationSeconds: &expirationSeconds,
 			},
 		}
 		if err := r.Create(ctx, &csr); err != nil {
@@ -181,9 +194,19 @@ func EnsureCertKubeconfig(ctx context.Context, r client.Client, user *authv1alph
 	}
 	logger.Info("Successfully extracted certificate expiry", "expiry", certExpiryTime)
 
-	// Update user status with actual certificate expiry
+	// Update user status with actual certificate expiry and renewal time
 	user.Status.ExpiryTime = certExpiryTime.Format(time.RFC3339)
 	user.Status.CertificateExpiry = "Certificate"
+
+	// Calculate renewal time based on rotation threshold (already calculated earlier)
+	renewalTime := certExpiryTime.Add(-rotationThreshold)
+	user.Status.RenewalTime = renewalTime.Format(time.RFC3339)
+
+	logger.Info("Certificate times calculated",
+		"expiry", certExpiryTime.Format(time.RFC3339),
+		"renewal", renewalTime.Format(time.RFC3339),
+		"rotationThreshold", rotationThreshold)
+
 	if err := r.Status().Update(ctx, user); err != nil {
 		return false, fmt.Errorf("failed to update user status with certificate expiry: %w", err)
 	}
@@ -402,4 +425,19 @@ func cleanupCertificateResources(ctx context.Context, r client.Client, cfgSecret
 	// In a future enhancement, you might want to rotate keys as well
 
 	return nil
+}
+
+// getRotationThreshold returns the rotation threshold for certificates
+// Can be overridden with KUBEUSER_ROTATION_THRESHOLD environment variable
+// Default: rotate when remaining lifetime ≤ 25% of original TTL
+func getRotationThreshold(certDuration time.Duration) time.Duration {
+	if thresholdStr := os.Getenv("KUBEUSER_ROTATION_THRESHOLD"); thresholdStr != "" {
+		if threshold, err := time.ParseDuration(thresholdStr); err == nil {
+			return threshold
+		}
+	}
+
+	// Default: rotate when 25% of lifetime remains (75% consumed)
+	// This means certificates rotate when they have 20-30% of their lifetime left
+	return certDuration / 4 // 25% of original duration
 }

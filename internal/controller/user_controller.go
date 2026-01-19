@@ -9,10 +9,11 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	authv1alpha1 "github.com/openkube-hub/KubeUser/api/v1alpha1"
-	"github.com/openkube-hub/KubeUser/internal/controller/certs"
+	"github.com/openkube-hub/KubeUser/internal/controller/auth"
 	"github.com/openkube-hub/KubeUser/internal/controller/cleanup"
 	"github.com/openkube-hub/KubeUser/internal/controller/helpers"
 	"github.com/openkube-hub/KubeUser/internal/controller/rbac"
@@ -27,7 +28,8 @@ import (
 // UserReconciler reconciles a User object
 type UserReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme      *runtime.Scheme
+	AuthManager *auth.Manager
 }
 
 // RBAC rules
@@ -79,6 +81,17 @@ func (r *UserReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	} else {
 		logger.Info("Status already set, skipping initial status", "phase", user.Status.Phase)
 	}
+
+	// Validate auth specification
+	logger.Info("Validating auth specification", "authType", user.Spec.Auth.Type, "authTTL", user.Spec.Auth.TTL)
+	if err := auth.ValidateAuthSpec(&user); err != nil {
+		logger.Error(err, "Invalid auth specification")
+		user.Status.Phase = helpers.PhaseError
+		user.Status.Message = fmt.Sprintf("Invalid auth specification: %v", err)
+		_ = r.Status().Update(ctx, &user)
+		return ctrl.Result{}, err
+	}
+	logger.Info("Auth specification validation passed")
 
 	// Handle deletion
 	logger.Info("Checking deletion", "deletionTimestamp", user.DeletionTimestamp)
@@ -148,20 +161,37 @@ func (r *UserReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		logger.Info("*** updateUserStatus completed successfully ***")
 	}
 
-	// Ensure cert-based kubeconfig
-	logger.Info("Starting certificate/kubeconfig processing")
-	requeue, err := certs.EnsureCertKubeconfig(ctx, r.Client, &user)
+	// Ensure authentication credentials using auth manager
+	logger.Info("Starting authentication credential processing")
+	if r.AuthManager == nil {
+		r.AuthManager = auth.NewManager(r.Client)
+	}
+
+	err := r.AuthManager.Ensure(ctx, &user)
 	if err != nil {
-		logger.Error(err, "Failed to ensure certificate kubeconfig")
-		logger.Info("=== END RECONCILE (CERT ERROR) ===")
+		logger.Error(err, "Failed to ensure authentication credentials")
+
+		// Check if this is a requeue error
+		if strings.Contains(err.Error(), "requeue needed") {
+			logger.Info("Authentication processing needs requeue")
+			return ctrl.Result{RequeueAfter: 3 * time.Second}, nil
+		}
+
+		// For OIDC not implemented error, set appropriate status
+		if strings.Contains(err.Error(), "not yet implemented") {
+			user.Status.Phase = helpers.PhaseError
+			user.Status.Message = fmt.Sprintf("Authentication type not implemented: %v", err)
+			_ = r.Status().Update(ctx, &user)
+			return ctrl.Result{}, err
+		}
+
+		// Other errors
+		user.Status.Phase = helpers.PhaseError
+		user.Status.Message = fmt.Sprintf("Failed to ensure authentication: %v", err)
+		_ = r.Status().Update(ctx, &user)
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
-	if requeue {
-		logger.Info("Certificate processing needs requeue")
-		logger.Info("=== END RECONCILE (REQUEUE) ===")
-		return ctrl.Result{RequeueAfter: 3 * time.Second}, nil
-	}
-	logger.Info("Certificate/kubeconfig processing completed")
+	logger.Info("Authentication credential processing completed")
 
 	// Requeue if user is close to expiry to handle cleanup
 	logger.Info("Checking expiry for requeue", "phase", user.Status.Phase, "expiryTime", user.Status.ExpiryTime)
@@ -194,6 +224,11 @@ func (r *UserReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 
 // SetupWithManager wires the controller
 func (r *UserReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Initialize auth manager
+	if r.AuthManager == nil {
+		r.AuthManager = auth.NewManager(r.Client)
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&authv1alpha1.User{}).
 		Owns(&rbacv1.RoleBinding{}).
