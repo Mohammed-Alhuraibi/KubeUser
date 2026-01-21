@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/openkube-hub/KubeUser/internal/controller/cleanup"
 	"github.com/openkube-hub/KubeUser/internal/controller/helpers"
 	"github.com/openkube-hub/KubeUser/internal/controller/rbac"
+	"github.com/openkube-hub/KubeUser/internal/controller/renewal"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -28,8 +30,9 @@ import (
 // UserReconciler reconciles a User object
 type UserReconciler struct {
 	client.Client
-	Scheme      *runtime.Scheme
-	AuthManager *auth.Manager
+	Scheme            *runtime.Scheme
+	AuthManager       *auth.Manager
+	RenewalCalculator *renewal.RenewalCalculator
 }
 
 // RBAC rules
@@ -193,8 +196,23 @@ func (r *UserReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	}
 	logger.Info("Authentication credential processing completed")
 
-	// Requeue if user is close to expiry to handle cleanup
-	logger.Info("Checking expiry for requeue", "phase", user.Status.Phase, "expiryTime", user.Status.ExpiryTime)
+	// Requeue based on auto-renewal configuration
+	logger.Info("Calculating requeue strategy", "phase", user.Status.Phase, "autoRenew", user.Spec.Auth.AutoRenew)
+
+	if user.Spec.Auth.AutoRenew && user.Status.Phase == "Active" {
+		requeueAfter, err := r.calculateSmartRequeue(ctx, &user)
+		if err != nil {
+			logger.Error(err, "Failed to calculate smart requeue, using default")
+			logger.Info("=== END RECONCILE (DEFAULT REQUEUE) ===")
+			return ctrl.Result{RequeueAfter: 30 * time.Minute}, nil
+		}
+
+		logger.Info("Smart requeue calculated", "requeueAfter", requeueAfter)
+		logger.Info("=== END RECONCILE (SMART REQUEUE) ===")
+		return ctrl.Result{RequeueAfter: requeueAfter}, nil
+	}
+
+	// Legacy expiry-based requeue for non-auto-renewal users
 	if user.Status.Phase == "Active" && user.Status.ExpiryTime != "" {
 		if expiryTime, err := time.Parse(time.RFC3339, user.Status.ExpiryTime); err == nil {
 			timeUntilExpiry := time.Until(expiryTime)
@@ -222,11 +240,85 @@ func (r *UserReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	return ctrl.Result{RequeueAfter: 30 * time.Minute}, nil // Regular reconciliation
 }
 
+// calculateSmartRequeue calculates the optimal requeue time for auto-renewal
+func (r *UserReconciler) calculateSmartRequeue(ctx context.Context, user *authv1alpha1.User) (time.Duration, error) {
+	logger := logf.FromContext(ctx)
+
+	// Initialize renewal calculator if not already done
+	if r.RenewalCalculator == nil {
+		r.RenewalCalculator = renewal.NewRenewalCalculator()
+	}
+
+	// Get certificate duration
+	certDuration := auth.GetAuthDuration(user)
+
+	// Use NextRenewalTime from status if available (most efficient)
+	if user.Status.NextRenewalTime != nil {
+		now := time.Now()
+		renewalTime := user.Status.NextRenewalTime.Time
+
+		if renewalTime.Before(now) {
+			// Should renew immediately
+			logger.Info("Certificate should renew immediately")
+			return 0, nil
+		}
+
+		requeueAfter := renewalTime.Sub(now)
+
+		// Add small jitter to prevent thundering herd
+		jitter := time.Duration(rand.Int63n(int64(5 * time.Minute)))
+		requeueAfter += jitter
+
+		// Cap requeue time to reasonable limits
+		if requeueAfter > 24*time.Hour {
+			requeueAfter = 24 * time.Hour
+		}
+		if requeueAfter < 1*time.Minute {
+			requeueAfter = 1 * time.Minute
+		}
+
+		logger.Info("Smart requeue calculated from NextRenewalTime",
+			"renewalTime", renewalTime.Format(time.RFC3339),
+			"requeueAfter", requeueAfter,
+			"jitter", jitter)
+
+		return requeueAfter, nil
+	}
+
+	// Fallback: calculate from certificate expiry
+	if user.Status.ExpiryTime != "" {
+		certExpiry, err := time.Parse(time.RFC3339, user.Status.ExpiryTime)
+		if err != nil {
+			return 0, fmt.Errorf("failed to parse certificate expiry: %w", err)
+		}
+
+		requeueAfter, err := r.RenewalCalculator.GetRequeueAfter(user, certExpiry, certDuration)
+		if err != nil {
+			return 0, fmt.Errorf("failed to calculate requeue time: %w", err)
+		}
+
+		logger.Info("Smart requeue calculated from certificate expiry",
+			"certExpiry", certExpiry.Format(time.RFC3339),
+			"requeueAfter", requeueAfter)
+
+		return requeueAfter, nil
+	}
+
+	// No certificate information available, use default
+	logger.Info("No certificate information available, using default requeue")
+	return 30 * time.Minute, nil
+}
+
 // SetupWithManager wires the controller
 func (r *UserReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// Initialize auth manager
 	if r.AuthManager == nil {
 		r.AuthManager = auth.NewManager(r.Client)
+	}
+
+	// Initialize renewal calculator
+	if r.RenewalCalculator == nil {
+		r.RenewalCalculator = renewal.NewRenewalCalculator()
 	}
 
 	return ctrl.NewControllerManagedBy(mgr).

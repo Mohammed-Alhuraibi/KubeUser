@@ -3,29 +3,35 @@ package auth
 import (
 	"context"
 	"fmt"
+	"time"
 
 	authv1alpha1 "github.com/openkube-hub/KubeUser/api/v1alpha1"
 	"github.com/openkube-hub/KubeUser/internal/controller/certs"
+	"github.com/openkube-hub/KubeUser/internal/controller/renewal"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // X509Provider handles x509 certificate-based authentication
 type X509Provider struct {
-	client client.Client
+	client            client.Client
+	renewalCalculator *renewal.RenewalCalculator
+	rotationManager   *renewal.RotationManager
 }
 
 // NewX509Provider creates a new x509 auth provider
 func NewX509Provider(c client.Client) *X509Provider {
 	return &X509Provider{
-		client: c,
+		client:            c,
+		renewalCalculator: renewal.NewRenewalCalculator(),
+		rotationManager:   renewal.NewRotationManager(c),
 	}
 }
 
 // Ensure creates or updates x509 certificates and kubeconfig for the user
 func (p *X509Provider) Ensure(ctx context.Context, user *authv1alpha1.User) error {
 	logger := logf.FromContext(ctx)
-	logger.Info("Ensuring x509 authentication", "user", user.Name)
+	logger.Info("Ensuring x509 authentication", "user", user.Name, "autoRenew", user.Spec.Auth.AutoRenew)
 
 	// Validate auth spec
 	if err := ValidateAuthSpec(user); err != nil {
@@ -36,12 +42,43 @@ func (p *X509Provider) Ensure(ctx context.Context, user *authv1alpha1.User) erro
 	duration := GetAuthDuration(user)
 	logger.Info("Using certificate duration", "duration", duration)
 
-	// Use existing certificate logic but with custom duration
-	// This delegates to the existing certs package which handles:
-	// - Certificate signing request creation
-	// - Certificate approval and retrieval
-	// - Kubeconfig generation
-	// - Secret management
+	// Check if auto-renewal is enabled and certificate needs renewal
+	if user.Spec.Auth.AutoRenew {
+		needsRenewal, err := p.checkIfRenewalNeeded(ctx, user, duration)
+		if err != nil {
+			logger.Error(err, "Failed to check renewal status")
+			// Continue with normal certificate processing if renewal check fails
+		} else if needsRenewal {
+			logger.Info("Certificate needs renewal, starting rotation process")
+
+			// Update status to indicate renewal is starting
+			user.Status.Phase = "Renewing"
+			user.Status.Message = "Starting certificate renewal"
+			if err := p.client.Status().Update(ctx, user); err != nil {
+				logger.Error(err, "Failed to update status for renewal")
+			}
+
+			// Perform atomic certificate rotation
+			err = p.rotationManager.RotateUserCertificate(ctx, user, duration)
+			if err != nil {
+				logger.Error(err, "Certificate rotation failed")
+				user.Status.Phase = "Error"
+				user.Status.Message = fmt.Sprintf("Certificate renewal failed: %v", err)
+				_ = p.client.Status().Update(ctx, user)
+
+				// Check if this is a requeue error
+				if isRequeueError(err) {
+					return fmt.Errorf("certificate renewal in progress, requeue needed")
+				}
+				return fmt.Errorf("certificate renewal failed: %w", err)
+			}
+
+			logger.Info("Certificate rotation completed successfully")
+			return nil
+		}
+	}
+
+	// Use existing certificate logic for initial creation or non-renewal updates
 	requeue, err := certs.EnsureCertKubeconfigWithDuration(ctx, p.client, user, duration)
 	if err != nil {
 		return fmt.Errorf("failed to ensure certificate kubeconfig: %v", err)
@@ -49,12 +86,76 @@ func (p *X509Provider) Ensure(ctx context.Context, user *authv1alpha1.User) erro
 
 	if requeue {
 		logger.Info("Certificate processing requires requeue")
-		// Return a specific error that the controller can handle for requeuing
 		return fmt.Errorf("certificate processing in progress, requeue needed")
 	}
 
 	logger.Info("Successfully ensured x509 authentication", "user", user.Name)
 	return nil
+}
+
+// checkIfRenewalNeeded determines if the certificate needs renewal
+func (p *X509Provider) checkIfRenewalNeeded(ctx context.Context, user *authv1alpha1.User, certDuration time.Duration) (bool, error) {
+	logger := logf.FromContext(ctx)
+
+	// If NextRenewalTime is set in status, use it for efficient checking
+	if user.Status.NextRenewalTime != nil {
+		now := time.Now()
+		renewalTime := user.Status.NextRenewalTime.Time
+
+		logger.Info("Checking renewal time from status",
+			"now", now.Format(time.RFC3339),
+			"renewalTime", renewalTime.Format(time.RFC3339),
+			"needsRenewal", now.After(renewalTime))
+
+		return now.After(renewalTime), nil
+	}
+
+	// Fallback: parse certificate expiry from status
+	if user.Status.ExpiryTime != "" {
+		certExpiry, err := time.Parse(time.RFC3339, user.Status.ExpiryTime)
+		if err != nil {
+			logger.Error(err, "Failed to parse certificate expiry time", "expiryTime", user.Status.ExpiryTime)
+			return false, err
+		}
+
+		return p.renewalCalculator.ShouldRenewNow(user, certExpiry, certDuration)
+	}
+
+	// No expiry information available, assume no renewal needed
+	logger.Info("No certificate expiry information available, assuming no renewal needed")
+	return false, nil
+}
+
+// isRequeueError checks if an error indicates that requeuing is needed
+func isRequeueError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	errMsg := err.Error()
+	return contains(errMsg, "requeue needed") ||
+		contains(errMsg, "CSR created") ||
+		contains(errMsg, "approval in progress") ||
+		contains(errMsg, "waiting for")
+}
+
+// contains checks if a string contains a substring (case-insensitive helper)
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) &&
+		(s == substr ||
+			(len(s) > len(substr) &&
+				(s[:len(substr)] == substr ||
+					s[len(s)-len(substr):] == substr ||
+					containsSubstring(s, substr))))
+}
+
+func containsSubstring(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }
 
 // Revoke removes x509 certificates and kubeconfig for the user

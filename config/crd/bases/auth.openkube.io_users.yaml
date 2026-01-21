@@ -19,13 +19,17 @@ spec:
       jsonPath: .status.phase
       name: Phase
       type: string
+    - description: Auto-renewal enabled
+      jsonPath: .spec.auth.autoRenew
+      name: AutoRenew
+      type: boolean
     - description: Certificate expiry time
       jsonPath: .status.expiryTime
       name: Expiry
       type: string
-    - description: Certificate renewal time
-      jsonPath: .status.renewalTime
-      name: Renewal
+    - description: Next renewal time
+      jsonPath: .status.nextRenewalTime
+      name: NextRenewal
       type: string
     - description: Time since the user was created
       jsonPath: .metadata.creationTimestamp
@@ -64,6 +68,16 @@ spec:
               auth:
                 description: Auth defines authentication configuration
                 properties:
+                  autoRenew:
+                    default: false
+                    description: AutoRenew enables automatic certificate renewal
+                    type: boolean
+                  renewBefore:
+                    description: |-
+                      RenewBefore specifies when to renew before expiry
+                      Overrides the default 33% rule. Must be less than TTL.
+                      Examples: "5m", "30d", "720h"
+                    type: string
                   ttl:
                     default: 2160h
                     description: |-
@@ -196,10 +210,40 @@ spec:
               message:
                 description: Message provides details about the current status
                 type: string
+              nextRenewalTime:
+                description: |-
+                  NextRenewalTime is the calculated next renewal time to avoid redundant PEM parsing
+                  This is updated during reconciliation and used for efficient requeue scheduling
+                format: date-time
+                type: string
               phase:
                 description: Phase is a simple high-level status (Pending, Active,
-                  Expired, Error)
+                  Expired, Error, Renewing)
                 type: string
+              renewalHistory:
+                description: RenewalHistory tracks recent renewal attempts for observability
+                items:
+                  description: RenewalAttempt tracks a single renewal attempt
+                  properties:
+                    csrName:
+                      description: CSRName is the name of the CSR created for this
+                        renewal
+                      type: string
+                    message:
+                      description: Message provides details about the renewal attempt
+                      type: string
+                    success:
+                      description: Success indicates if the renewal was successful
+                      type: boolean
+                    timestamp:
+                      description: Timestamp when the renewal was attempted
+                      format: date-time
+                      type: string
+                  required:
+                  - success
+                  - timestamp
+                  type: object
+                type: array
               renewalTime:
                 description: |-
                   RenewalTime is when the certificate will be automatically renewed (RFC3339 format)

@@ -46,6 +46,17 @@ type AuthSpec struct {
 	// +kubebuilder:validation:Pattern=^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
 	// +kubebuilder:default="2160h"
 	TTL string `json:"ttl,omitempty"`
+
+	// AutoRenew enables automatic certificate renewal
+	// +optional
+	// +kubebuilder:default=false
+	AutoRenew bool `json:"autoRenew,omitempty"`
+
+	// RenewBefore specifies when to renew before expiry
+	// Overrides the default 33% rule. Must be less than TTL.
+	// Examples: "5m", "30d", "720h"
+	// +optional
+	RenewBefore *metav1.Duration `json:"renewBefore,omitempty"`
 }
 
 // UserSpec defines the desired state of User
@@ -79,12 +90,17 @@ type UserStatus struct {
 	// +optional
 	RenewalTime string `json:"renewalTime,omitempty"`
 
+	// NextRenewalTime is the calculated next renewal time to avoid redundant PEM parsing
+	// This is updated during reconciliation and used for efficient requeue scheduling
+	// +optional
+	NextRenewalTime *metav1.Time `json:"nextRenewalTime,omitempty"`
+
 	// CertificateExpiry indicates if the expiry time comes from actual certificate
 	// Values: "Certificate", "Calculated", "Unknown"
 	// +optional
 	CertificateExpiry string `json:"certificateExpiry,omitempty"`
 
-	// Phase is a simple high-level status (Pending, Active, Expired, Error)
+	// Phase is a simple high-level status (Pending, Active, Expired, Error, Renewing)
 	// +optional
 	Phase string `json:"phase,omitempty"`
 
@@ -95,6 +111,27 @@ type UserStatus struct {
 	// Conditions follow Kubernetes conventions for detailed status
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// RenewalHistory tracks recent renewal attempts for observability
+	// +optional
+	RenewalHistory []RenewalAttempt `json:"renewalHistory,omitempty"`
+}
+
+// RenewalAttempt tracks a single renewal attempt
+type RenewalAttempt struct {
+	// Timestamp when the renewal was attempted
+	Timestamp metav1.Time `json:"timestamp"`
+
+	// Success indicates if the renewal was successful
+	Success bool `json:"success"`
+
+	// Message provides details about the renewal attempt
+	// +optional
+	Message string `json:"message,omitempty"`
+
+	// CSRName is the name of the CSR created for this renewal
+	// +optional
+	CSRName string `json:"csrName,omitempty"`
 }
 
 //
@@ -105,8 +142,9 @@ type UserStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster
 // +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase",description="Current phase of the user"
+// +kubebuilder:printcolumn:name="AutoRenew",type="boolean",JSONPath=".spec.auth.autoRenew",description="Auto-renewal enabled"
 // +kubebuilder:printcolumn:name="Expiry",type="string",JSONPath=".status.expiryTime",description="Certificate expiry time"
-// +kubebuilder:printcolumn:name="Renewal",type="string",JSONPath=".status.renewalTime",description="Certificate renewal time"
+// +kubebuilder:printcolumn:name="NextRenewal",type="string",JSONPath=".status.nextRenewalTime",description="Next renewal time"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",description="Time since the user was created"
 // +kubebuilder:printcolumn:name="Message",type="string",JSONPath=".status.message",description="Status message",priority=1
 

@@ -441,3 +441,30 @@ func getRotationThreshold(certDuration time.Duration) time.Duration {
 	// This means certificates rotate when they have 20-30% of their lifetime left
 	return certDuration / 4 // 25% of original duration
 }
+
+// GetClusterCABase64 gets the cluster CA certificate in base64 format (exported for renewal package)
+func GetClusterCABase64(ctx context.Context, r client.Client) (string, error) {
+	return getClusterCABase64(ctx, r)
+}
+
+// GetAPIServerURL gets the API server URL (exported for renewal package)
+func GetAPIServerURL() string {
+	apiServer := os.Getenv("KUBERNETES_API_SERVER")
+	if apiServer == "" {
+		apiServer = "https://kubernetes.default.svc"
+	}
+	return apiServer
+}
+
+// BuildCertKubeconfig builds a kubeconfig with certificate authentication (exported for renewal package)
+func BuildCertKubeconfig(apiServer, caDataB64 string, signedCert, keyPEM []byte, username string) []byte {
+	return buildCertKubeconfig(apiServer, caDataB64,
+		base64.StdEncoding.EncodeToString(signedCert),
+		base64.StdEncoding.EncodeToString(keyPEM),
+		username)
+}
+
+// ExtractCertificateExpiryWithFormatDetection extracts certificate expiry (exported for renewal package)
+func ExtractCertificateExpiryWithFormatDetection(certData []byte) (time.Time, error) {
+	return extractCertificateExpiryWithFormatDetection(certData)
+}
