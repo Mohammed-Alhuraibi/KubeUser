@@ -28,7 +28,7 @@ spec:
       name: Expiry
       type: string
     - description: Next renewal time
-      jsonPath: .status.nextRenewalTime
+      jsonPath: .status.nextRenewalAt
       name: NextRenewal
       type: string
     - description: Time since the user was created
@@ -210,10 +210,10 @@ spec:
               message:
                 description: Message provides details about the current status
                 type: string
-              nextRenewalTime:
+              nextRenewalAt:
                 description: |-
-                  NextRenewalTime is the calculated next renewal time to avoid redundant PEM parsing
-                  This is updated during reconciliation and used for efficient requeue scheduling
+                  NextRenewalAt is when the certificate will be automatically renewed
+                  This consolidates the previous RenewalTime and NextRenewalTime fields
                 format: date-time
                 type: string
               phase:
@@ -244,11 +244,6 @@ spec:
                   - timestamp
                   type: object
                 type: array
-              renewalTime:
-                description: |-
-                  RenewalTime is when the certificate will be automatically renewed (RFC3339 format)
-                  This is calculated as ExpiryTime - RotationThreshold
-                type: string
             type: object
         required:
         - spec

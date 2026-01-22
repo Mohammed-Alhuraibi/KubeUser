@@ -252,10 +252,10 @@ func (r *UserReconciler) calculateSmartRequeue(ctx context.Context, user *authv1
 	// Get certificate duration
 	certDuration := auth.GetAuthDuration(user)
 
-	// Use NextRenewalTime from status if available (most efficient)
-	if user.Status.NextRenewalTime != nil {
+	// Use NextRenewalAt from status if available (most efficient)
+	if user.Status.NextRenewalAt != nil {
 		now := time.Now()
-		renewalTime := user.Status.NextRenewalTime.Time
+		renewalTime := user.Status.NextRenewalAt.Time
 
 		if renewalTime.Before(now) {
 			// Should renew immediately
@@ -277,7 +277,7 @@ func (r *UserReconciler) calculateSmartRequeue(ctx context.Context, user *authv1
 			requeueAfter = 1 * time.Minute
 		}
 
-		logger.Info("Smart requeue calculated from NextRenewalTime",
+		logger.Info("Smart requeue calculated from NextRenewalAt",
 			"renewalTime", renewalTime.Format(time.RFC3339),
 			"requeueAfter", requeueAfter,
 			"jitter", jitter)

@@ -97,10 +97,10 @@ func (p *X509Provider) Ensure(ctx context.Context, user *authv1alpha1.User) erro
 func (p *X509Provider) checkIfRenewalNeeded(ctx context.Context, user *authv1alpha1.User, certDuration time.Duration) (bool, error) {
 	logger := logf.FromContext(ctx)
 
-	// If NextRenewalTime is set in status, use it for efficient checking
-	if user.Status.NextRenewalTime != nil {
+	// If NextRenewalAt is set in status, use it for efficient checking
+	if user.Status.NextRenewalAt != nil {
 		now := time.Now()
-		renewalTime := user.Status.NextRenewalTime.Time
+		renewalTime := user.Status.NextRenewalAt.Time
 
 		logger.Info("Checking renewal time from status",
 			"now", now.Format(time.RFC3339),

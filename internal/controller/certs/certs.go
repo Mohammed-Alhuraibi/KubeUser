@@ -198,14 +198,15 @@ func EnsureCertKubeconfigWithDuration(ctx context.Context, r client.Client, user
 	user.Status.ExpiryTime = certExpiryTime.Format(time.RFC3339)
 	user.Status.CertificateExpiry = "Certificate"
 
-	// Calculate renewal time based on rotation threshold (already calculated earlier)
-	renewalTime := certExpiryTime.Add(-rotationThreshold)
-	user.Status.RenewalTime = renewalTime.Format(time.RFC3339)
+	// Calculate renewal time using proper renewal logic that respects RenewBefore
+	issuedAt := time.Now() // Certificate was just issued
+	nextRenewal := calculateNextRenewal(issuedAt, certExpiryTime, user.Spec.Auth.RenewBefore)
+	user.Status.NextRenewalAt = &nextRenewal
 
 	logger.Info("Certificate times calculated",
 		"expiry", certExpiryTime.Format(time.RFC3339),
-		"renewal", renewalTime.Format(time.RFC3339),
-		"rotationThreshold", rotationThreshold)
+		"nextRenewalAt", nextRenewal.Time.Format(time.RFC3339),
+		"renewBefore", user.Spec.Auth.RenewBefore)
 
 	if err := r.Status().Update(ctx, user); err != nil {
 		return false, fmt.Errorf("failed to update user status with certificate expiry: %w", err)
@@ -467,4 +468,43 @@ func BuildCertKubeconfig(apiServer, caDataB64 string, signedCert, keyPEM []byte,
 // ExtractCertificateExpiryWithFormatDetection extracts certificate expiry (exported for renewal package)
 func ExtractCertificateExpiryWithFormatDetection(certData []byte) (time.Time, error) {
 	return extractCertificateExpiryWithFormatDetection(certData)
+}
+
+// calculateNextRenewal calculates the next renewal time based on certificate info
+// This is a local implementation to avoid import cycles with the renewal package
+func calculateNextRenewal(issuedAt, expiry time.Time, renewBefore *metav1.Duration) metav1.Time {
+	const (
+		// DefaultRenewalPercentage is the default percentage of certificate lifetime
+		// after which renewal should occur (cert-manager style: 1/3 = 33%)
+		DefaultRenewalPercentage = 0.33
+		// MinimumRenewalBuffer is the absolute minimum time before expiry
+		MinimumRenewalBuffer = 2 * time.Minute
+	)
+
+	var renewalTime time.Time
+
+	certDuration := expiry.Sub(issuedAt)
+
+	if renewBefore != nil {
+		// Use custom renewBefore setting
+		renewalTime = expiry.Add(-renewBefore.Duration)
+	} else {
+		// Use 1/3 rule (cert-manager standard)
+		renewalBuffer := time.Duration(float64(certDuration) * DefaultRenewalPercentage)
+		renewalTime = expiry.Add(-renewalBuffer)
+	}
+
+	// Safety floor: ensure at least 2 minutes before expiry
+	safetyFloorTime := expiry.Add(-MinimumRenewalBuffer)
+	if renewalTime.After(safetyFloorTime) {
+		renewalTime = safetyFloorTime
+	}
+
+	// Ensure renewal time is not in the past
+	now := time.Now()
+	if renewalTime.Before(now) {
+		renewalTime = now
+	}
+
+	return metav1.Time{Time: renewalTime}
 }

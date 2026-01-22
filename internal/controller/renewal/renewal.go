@@ -157,10 +157,9 @@ func (rc *RenewalCalculator) UpdateUserRenewalStatus(user *authv1alpha1.User, ce
 		return err
 	}
 
-	// Update status fields
+	// Update status fields with consolidated NextRenewalAt
 	user.Status.ExpiryTime = certExpiry.Format(time.RFC3339)
-	user.Status.RenewalTime = renewalTime.Format(time.RFC3339)
-	user.Status.NextRenewalTime = &metav1.Time{Time: renewalTime}
+	user.Status.NextRenewalAt = &metav1.Time{Time: renewalTime}
 	user.Status.CertificateExpiry = "Certificate"
 
 	return nil
@@ -193,14 +192,55 @@ func ValidateRenewalConfig(user *authv1alpha1.User) error {
 		}
 
 		if renewBefore >= certDuration {
-			return fmt.Errorf("renewBefore (%v) must be less than certificate TTL (%v)", renewBefore, certDuration)
+			// Auto-fix: set renewBefore to 50% of TTL if it's >= TTL
+			fixedRenewBefore := time.Duration(float64(certDuration) * 0.5)
+			user.Spec.Auth.RenewBefore = &metav1.Duration{Duration: fixedRenewBefore}
+			return fmt.Errorf("renewBefore (%v) was >= TTL (%v), auto-corrected to 50%% of TTL (%v)", renewBefore, certDuration, fixedRenewBefore)
 		}
 
-		// Ensure renewBefore is at least the minimum buffer for very short certificates
-		if renewBefore < MinimumRenewalBuffer && certDuration <= 10*time.Minute {
-			return fmt.Errorf("renewBefore (%v) must be at least %v for certificates shorter than 10 minutes", renewBefore, MinimumRenewalBuffer)
+		// Ensure renewBefore is at least 2 minutes shorter than TTL for safety
+		minSafetyBuffer := 2 * time.Minute
+		if certDuration-renewBefore < minSafetyBuffer {
+			// Auto-fix: ensure at least 2 minutes safety buffer
+			fixedRenewBefore := certDuration - minSafetyBuffer
+			if fixedRenewBefore <= 0 {
+				// For very short certificates, use 50% rule
+				fixedRenewBefore = time.Duration(float64(certDuration) * 0.5)
+			}
+			user.Spec.Auth.RenewBefore = &metav1.Duration{Duration: fixedRenewBefore}
+			return fmt.Errorf("renewBefore (%v) too close to TTL (%v), auto-corrected to %v for safety", renewBefore, certDuration, fixedRenewBefore)
 		}
 	}
 
 	return nil
+}
+
+// CalculateNextRenewal calculates the next renewal time based on certificate info
+func CalculateNextRenewal(issuedAt, expiry time.Time, renewBefore *metav1.Duration) metav1.Time {
+	var renewalTime time.Time
+
+	certDuration := expiry.Sub(issuedAt)
+
+	if renewBefore != nil {
+		// Use custom renewBefore setting
+		renewalTime = expiry.Add(-renewBefore.Duration)
+	} else {
+		// Use 1/3 rule (cert-manager standard)
+		renewalBuffer := time.Duration(float64(certDuration) * DefaultRenewalPercentage)
+		renewalTime = expiry.Add(-renewalBuffer)
+	}
+
+	// Safety floor: ensure at least 2 minutes before expiry
+	safetyFloorTime := expiry.Add(-MinimumRenewalBuffer)
+	if renewalTime.After(safetyFloorTime) {
+		renewalTime = safetyFloorTime
+	}
+
+	// Ensure renewal time is not in the past
+	now := time.Now()
+	if renewalTime.Before(now) {
+		renewalTime = now
+	}
+
+	return metav1.Time{Time: renewalTime}
 }

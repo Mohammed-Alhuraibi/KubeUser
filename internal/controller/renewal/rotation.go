@@ -62,18 +62,9 @@ func (rm *RotationManager) RotateUserCertificate(ctx context.Context, user *auth
 
 	logger.Info("Starting stateful certificate rotation", "user", username, "uid", userUID, "duration", certDuration)
 
-	// Record renewal attempt
-	attempt := authv1alpha1.RenewalAttempt{
-		Timestamp: metav1.Now(),
-		Success:   false,
-		Message:   "Starting certificate rotation",
-	}
-
 	// Step 1: Check for existing Shadow Secret (stateful rotation)
 	shadowSecret, shadowExists, err := rm.getShadowSecret(ctx, username)
 	if err != nil {
-		attempt.Message = fmt.Sprintf("Failed to check shadow secret: %v", err)
-		rm.recordRenewalAttempt(user, attempt)
 		return fmt.Errorf("failed to check shadow secret: %w", err)
 	}
 
@@ -86,8 +77,11 @@ func (rm *RotationManager) RotateUserCertificate(ctx context.Context, user *auth
 
 		newPrivateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 		if err != nil {
-			attempt.Message = fmt.Sprintf("Failed to generate private key: %v", err)
-			rm.recordRenewalAttempt(user, attempt)
+			rm.recordRenewalAttempt(user, authv1alpha1.RenewalAttempt{
+				Timestamp: metav1.Now(),
+				Success:   false,
+				Message:   fmt.Sprintf("Failed to generate private key: %v", err),
+			})
 			return fmt.Errorf("failed to generate private key: %w", err)
 		}
 
@@ -102,63 +96,74 @@ func (rm *RotationManager) RotateUserCertificate(ctx context.Context, user *auth
 		// Create Shadow Secret with owner reference
 		err = rm.createShadowSecret(ctx, user, username, keyPEM, csrName)
 		if err != nil {
-			attempt.Message = fmt.Sprintf("Failed to create shadow secret: %v", err)
-			rm.recordRenewalAttempt(user, attempt)
+			rm.recordRenewalAttempt(user, authv1alpha1.RenewalAttempt{
+				Timestamp: metav1.Now(),
+				Success:   false,
+				Message:   fmt.Sprintf("Failed to create shadow secret: %v", err),
+				CSRName:   csrName,
+			})
 			return fmt.Errorf("failed to create shadow secret: %w", err)
 		}
 
-		attempt.Message = "Shadow secret created, requeuing for CSR creation"
-		attempt.CSRName = csrName
-		rm.recordRenewalAttempt(user, attempt)
+		// Record shadow secret creation (but don't mark as failed - this is progress)
+		rm.recordRenewalAttempt(user, authv1alpha1.RenewalAttempt{
+			Timestamp: metav1.Now(),
+			Success:   false, // Not complete yet, but not a failure
+			Message:   "Shadow secret created, proceeding with CSR creation",
+			CSRName:   csrName,
+		})
 
-		logger.Info("Shadow secret created, requeuing", "csrName", csrName)
-		return fmt.Errorf("shadow secret created, requeue needed")
-	}
+		logger.Info("Shadow secret created, continuing with CSR creation", "csrName", csrName)
+		// Don't return here - continue with CSR creation in the same reconcile loop
+	} else {
+		// Step 1b: Retrieve key and CSR name from existing Shadow Secret
+		keyPEM = shadowSecret.Data["key.pem"]
+		csrName = string(shadowSecret.Data["csr.name"])
 
-	// Step 1b: Retrieve key and CSR name from existing Shadow Secret
-	keyPEM = shadowSecret.Data["key.pem"]
-	csrName = string(shadowSecret.Data["csr.name"])
-
-	if len(keyPEM) == 0 || csrName == "" {
-		// Corrupted shadow secret, delete and retry
-		logger.Error(nil, "Corrupted shadow secret found, deleting", "shadowSecret", shadowSecret.Name)
-		if err := rm.deleteShadowSecret(ctx, username); err != nil {
-			logger.Error(err, "Failed to delete corrupted shadow secret")
+		if len(keyPEM) == 0 || csrName == "" {
+			// Corrupted shadow secret, delete and retry
+			logger.Error(nil, "Corrupted shadow secret found, deleting", "shadowSecret", shadowSecret.Name)
+			if err := rm.deleteShadowSecret(ctx, username); err != nil {
+				logger.Error(err, "Failed to delete corrupted shadow secret")
+			}
+			return fmt.Errorf("corrupted shadow secret found, deleted and requeue needed")
 		}
-		return fmt.Errorf("corrupted shadow secret found, deleted and requeue needed")
-	}
 
-	logger.Info("Using existing shadow secret", "csrName", csrName)
-	attempt.CSRName = csrName
+		logger.Info("Using existing shadow secret", "csrName", csrName)
+	}
 
 	// Step 2: Ensure CSR exists
 	csr, err := rm.ensureCSRExists(ctx, user, csrName, username, keyPEM, certDuration)
 	if err != nil {
-		attempt.Message = fmt.Sprintf("Failed to ensure CSR exists: %v", err)
-		rm.recordRenewalAttempt(user, attempt)
+		rm.recordRenewalAttempt(user, authv1alpha1.RenewalAttempt{
+			Timestamp: metav1.Now(),
+			Success:   false,
+			Message:   fmt.Sprintf("Failed to ensure CSR exists: %v", err),
+			CSRName:   csrName,
+		})
 		return fmt.Errorf("failed to ensure CSR exists: %w", err)
 	}
 
 	// Step 3: Programmatically approve CSR
 	approved, err := rm.ensureCSRApproved(ctx, csr)
 	if err != nil {
-		attempt.Message = fmt.Sprintf("Failed to approve CSR: %v", err)
-		rm.recordRenewalAttempt(user, attempt)
+		rm.recordRenewalAttempt(user, authv1alpha1.RenewalAttempt{
+			Timestamp: metav1.Now(),
+			Success:   false,
+			Message:   fmt.Sprintf("Failed to approve CSR: %v", err),
+			CSRName:   csrName,
+		})
 		return fmt.Errorf("failed to approve CSR: %w", err)
 	}
 
 	if !approved {
 		logger.Info("CSR approval in progress", "csrName", csrName)
-		attempt.Message = "CSR approval in progress"
-		rm.recordRenewalAttempt(user, attempt)
 		return fmt.Errorf("CSR approval in progress, requeue needed")
 	}
 
 	// Step 4: Wait for signed certificate
 	if len(csr.Status.Certificate) == 0 {
 		logger.Info("Waiting for signed certificate", "csrName", csrName)
-		attempt.Message = "Waiting for signed certificate"
-		rm.recordRenewalAttempt(user, attempt)
 		return fmt.Errorf("waiting for signed certificate, requeue needed")
 	}
 
@@ -168,8 +173,12 @@ func (rm *RotationManager) RotateUserCertificate(ctx context.Context, user *auth
 	// Step 5: Atomic update to primary Kubeconfig Secret (The Flip)
 	err = rm.atomicSecretUpdate(ctx, user, keyPEM, signedCert)
 	if err != nil {
-		attempt.Message = fmt.Sprintf("Failed to update primary secret: %v", err)
-		rm.recordRenewalAttempt(user, attempt)
+		rm.recordRenewalAttempt(user, authv1alpha1.RenewalAttempt{
+			Timestamp: metav1.Now(),
+			Success:   false,
+			Message:   fmt.Sprintf("Failed to update primary secret: %v", err),
+			CSRName:   csrName,
+		})
 		return fmt.Errorf("failed to update primary secret atomically: %w", err)
 	}
 
@@ -189,9 +198,12 @@ func (rm *RotationManager) RotateUserCertificate(ctx context.Context, user *auth
 	}
 
 	// Record successful renewal
-	attempt.Success = true
-	attempt.Message = "Certificate rotation completed successfully"
-	rm.recordRenewalAttempt(user, attempt)
+	rm.recordRenewalAttempt(user, authv1alpha1.RenewalAttempt{
+		Timestamp: metav1.Now(),
+		Success:   true,
+		Message:   "Certificate rotation completed successfully",
+		CSRName:   csrName,
+	})
 
 	logger.Info("Certificate rotation completed successfully", "user", username)
 	return nil

@@ -85,15 +85,10 @@ type UserStatus struct {
 	// +optional
 	ExpiryTime string `json:"expiryTime,omitempty"`
 
-	// RenewalTime is when the certificate will be automatically renewed (RFC3339 format)
-	// This is calculated as ExpiryTime - RotationThreshold
+	// NextRenewalAt is when the certificate will be automatically renewed
+	// This consolidates the previous RenewalTime and NextRenewalTime fields
 	// +optional
-	RenewalTime string `json:"renewalTime,omitempty"`
-
-	// NextRenewalTime is the calculated next renewal time to avoid redundant PEM parsing
-	// This is updated during reconciliation and used for efficient requeue scheduling
-	// +optional
-	NextRenewalTime *metav1.Time `json:"nextRenewalTime,omitempty"`
+	NextRenewalAt *metav1.Time `json:"nextRenewalAt,omitempty"`
 
 	// CertificateExpiry indicates if the expiry time comes from actual certificate
 	// Values: "Certificate", "Calculated", "Unknown"
@@ -144,7 +139,7 @@ type RenewalAttempt struct {
 // +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase",description="Current phase of the user"
 // +kubebuilder:printcolumn:name="AutoRenew",type="boolean",JSONPath=".spec.auth.autoRenew",description="Auto-renewal enabled"
 // +kubebuilder:printcolumn:name="Expiry",type="string",JSONPath=".status.expiryTime",description="Certificate expiry time"
-// +kubebuilder:printcolumn:name="NextRenewal",type="string",JSONPath=".status.nextRenewalTime",description="Next renewal time"
+// +kubebuilder:printcolumn:name="NextRenewal",type="string",JSONPath=".status.nextRenewalAt",description="Next renewal time"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",description="Time since the user was created"
 // +kubebuilder:printcolumn:name="Message",type="string",JSONPath=".status.message",description="Status message",priority=1
 

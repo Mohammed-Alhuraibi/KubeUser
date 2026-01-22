@@ -86,8 +86,7 @@ The User status includes several fields for monitoring renewal:
 status:
   phase: "Active"
   expiryTime: "2026-01-22T10:30:00Z"
-  renewalTime: "2026-01-22T02:30:00Z"
-  nextRenewalTime: "2026-01-22T02:30:00Z"
+  nextRenewalAt: "2026-01-22T02:30:00Z"
   certificateExpiry: "Certificate"
   conditions:
   - type: Ready
