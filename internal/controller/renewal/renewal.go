@@ -47,6 +47,15 @@ func NewRenewalCalculator() *RenewalCalculator {
 func (rc *RenewalCalculator) CalculateRenewalTime(user *authv1alpha1.User, certExpiry time.Time, certDuration time.Duration) (time.Time, error) {
 	var renewalTime time.Time
 
+	// Validate inputs
+	if certDuration <= 0 {
+		return time.Time{}, fmt.Errorf("certificate duration must be positive, got: %v", certDuration)
+	}
+
+	if certExpiry.IsZero() {
+		return time.Time{}, fmt.Errorf("certificate expiry time cannot be zero")
+	}
+
 	// Step 1: Check for custom renewBefore setting
 	if user.Spec.Auth.RenewBefore != nil {
 		customRenewBefore := user.Spec.Auth.RenewBefore.Duration
@@ -54,6 +63,11 @@ func (rc *RenewalCalculator) CalculateRenewalTime(user *authv1alpha1.User, certE
 		// Validate that renewBefore is less than certificate duration
 		if customRenewBefore >= certDuration {
 			return time.Time{}, fmt.Errorf("renewBefore (%v) must be less than certificate TTL (%v)", customRenewBefore, certDuration)
+		}
+
+		// Additional validation for very short certificates
+		if customRenewBefore <= 0 {
+			return time.Time{}, fmt.Errorf("renewBefore must be positive, got: %v", customRenewBefore)
 		}
 
 		renewalTime = certExpiry.Add(-customRenewBefore)

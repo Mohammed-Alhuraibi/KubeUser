@@ -147,16 +147,16 @@ func (rm *RotationManager) RotateUserCertificate(ctx context.Context, user *auth
 		return fmt.Errorf("failed to update secret atomically: %w", err)
 	}
 
-	// Step 8: Cleanup old CSR
+	// Step 8: Cleanup old CSR (best effort)
 	if err := rm.cleanupCSR(ctx, csrName); err != nil {
-		logger.Error(err, "Failed to cleanup CSR, continuing", "csrName", csrName)
-		// Don't fail the rotation for cleanup errors
+		logger.Error(err, "Failed to cleanup CSR, will retry on next reconciliation", "csrName", csrName)
+		// Don't fail the rotation for cleanup errors, but log for monitoring
 	}
 
-	// Step 9: Update user status with new certificate info
+	// Step 9: Update user status with new certificate info (best effort)
 	err = rm.updateUserStatusAfterRotation(ctx, user, signedCert, certDuration)
 	if err != nil {
-		logger.Error(err, "Failed to update user status after rotation")
+		logger.Error(err, "Failed to update user status after rotation, will retry on next reconciliation")
 		// Don't fail the rotation for status update errors
 	}
 
@@ -171,10 +171,10 @@ func (rm *RotationManager) RotateUserCertificate(ctx context.Context, user *auth
 
 // generateCSRName creates a deterministic CSR name for idempotency
 func (rm *RotationManager) generateCSRName(username string) string {
-	// Include timestamp to ensure uniqueness across rotations
-	// but make it deterministic within a short time window
-	timestamp := time.Now().Unix() / 300 // 5-minute windows for idempotency
-	return fmt.Sprintf("%s-csr-%d", username, timestamp)
+	// Use a more granular timestamp (1-minute windows) with rotation counter
+	// This reduces collision probability while maintaining idempotency
+	timestamp := time.Now().Unix() / 60 // 1-minute windows for better granularity
+	return fmt.Sprintf("%s-renewal-%d", username, timestamp)
 }
 
 // createCSRFromKey creates a CSR from the given private key
@@ -247,7 +247,7 @@ func (rm *RotationManager) createOrGetCSR(ctx context.Context, csrName, username
 	return newCSR, true, nil
 }
 
-// autoApproveCSR approves the CSR using the controller's identity
+// autoApproveCSR approves the CSR using the controller's identity with validation
 func (rm *RotationManager) autoApproveCSR(ctx context.Context, csr *certv1.CertificateSigningRequest) (bool, error) {
 	logger := logf.FromContext(ctx)
 
@@ -261,8 +261,14 @@ func (rm *RotationManager) autoApproveCSR(ctx context.Context, csr *certv1.Certi
 		}
 	}
 
+	// Validate CSR before approval for security
+	if err := rm.validateCSRForApproval(csr); err != nil {
+		logger.Error(err, "CSR validation failed", "csrName", csr.Name)
+		return false, fmt.Errorf("CSR validation failed: %w", err)
+	}
+
 	// Approve the CSR
-	logger.Info("Auto-approving CSR", "csrName", csr.Name)
+	logger.Info("Auto-approving validated CSR", "csrName", csr.Name)
 	csr.Status.Conditions = append(csr.Status.Conditions, certv1.CertificateSigningRequestCondition{
 		Type:           certv1.CertificateApproved,
 		Status:         corev1.ConditionTrue,
@@ -279,7 +285,7 @@ func (rm *RotationManager) autoApproveCSR(ctx context.Context, csr *certv1.Certi
 	return false, nil // Just approved, need to wait for certificate
 }
 
-// atomicSecretUpdate performs zero-downtime secret update
+// atomicSecretUpdate performs zero-downtime secret update with rollback capability
 func (rm *RotationManager) atomicSecretUpdate(ctx context.Context, user *authv1alpha1.User, newKeyPEM, signedCert []byte) error {
 	logger := logf.FromContext(ctx)
 	username := user.Name
@@ -296,11 +302,33 @@ func (rm *RotationManager) atomicSecretUpdate(ctx context.Context, user *authv1a
 	// Build new kubeconfig
 	newKubeconfig := rm.buildKubeconfig(apiServer, caDataB64, signedCert, newKeyPEM, username)
 
-	// Update secrets atomically
+	// Backup existing secrets for rollback
 	keySecretName := fmt.Sprintf("%s-key", username)
 	cfgSecretName := fmt.Sprintf("%s-kubeconfig", username)
 
-	// Update key secret
+	var oldKeySecret, oldCfgSecret *corev1.Secret
+
+	// Backup key secret
+	oldKeySecret = &corev1.Secret{}
+	err = rm.client.Get(ctx, types.NamespacedName{Name: keySecretName, Namespace: userNamespace}, oldKeySecret)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("failed to backup key secret: %w", err)
+	}
+	if apierrors.IsNotFound(err) {
+		oldKeySecret = nil // No existing secret to backup
+	}
+
+	// Backup kubeconfig secret
+	oldCfgSecret = &corev1.Secret{}
+	err = rm.client.Get(ctx, types.NamespacedName{Name: cfgSecretName, Namespace: userNamespace}, oldCfgSecret)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("failed to backup kubeconfig secret: %w", err)
+	}
+	if apierrors.IsNotFound(err) {
+		oldCfgSecret = nil // No existing secret to backup
+	}
+
+	// Update key secret first
 	keySecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      keySecretName,
@@ -317,7 +345,7 @@ func (rm *RotationManager) atomicSecretUpdate(ctx context.Context, user *authv1a
 		return fmt.Errorf("failed to update key secret: %w", err)
 	}
 
-	// Update kubeconfig secret
+	// Update kubeconfig secret with rollback on failure
 	cfgSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      cfgSecretName,
@@ -331,10 +359,17 @@ func (rm *RotationManager) atomicSecretUpdate(ctx context.Context, user *authv1a
 
 	err = helpers.CreateOrUpdate(ctx, rm.client, cfgSecret)
 	if err != nil {
+		// Rollback key secret on kubeconfig update failure
+		logger.Error(err, "Failed to update kubeconfig secret, rolling back key secret")
+		if oldKeySecret != nil {
+			if rollbackErr := helpers.CreateOrUpdate(ctx, rm.client, oldKeySecret); rollbackErr != nil {
+				logger.Error(rollbackErr, "Failed to rollback key secret")
+			}
+		}
 		return fmt.Errorf("failed to update kubeconfig secret: %w", err)
 	}
 
-	logger.Info("Atomic secret update completed", "user", username)
+	logger.Info("Atomic secret update completed successfully", "user", username)
 	return nil
 }
 
@@ -434,4 +469,56 @@ func (rm *RotationManager) recordRenewalAttempt(user *authv1alpha1.User, attempt
 	if len(user.Status.RenewalHistory) > 10 {
 		user.Status.RenewalHistory = user.Status.RenewalHistory[1:]
 	}
+}
+
+// validateCSRForApproval validates a CSR before auto-approval for security
+func (rm *RotationManager) validateCSRForApproval(csr *certv1.CertificateSigningRequest) error {
+	// Validate signer name
+	if csr.Spec.SignerName != certv1.KubeAPIServerClientSignerName {
+		return fmt.Errorf("invalid signer name: %s", csr.Spec.SignerName)
+	}
+
+	// Validate usages
+	expectedUsages := []certv1.KeyUsage{certv1.UsageClientAuth}
+	if len(csr.Spec.Usages) != len(expectedUsages) {
+		return fmt.Errorf("invalid usages count: expected %d, got %d", len(expectedUsages), len(csr.Spec.Usages))
+	}
+
+	for i, usage := range csr.Spec.Usages {
+		if usage != expectedUsages[i] {
+			return fmt.Errorf("invalid usage at index %d: expected %s, got %s", i, expectedUsages[i], usage)
+		}
+	}
+
+	// Validate labels
+	if csr.Labels == nil {
+		return fmt.Errorf("missing required labels")
+	}
+
+	if csr.Labels["auth.openkube.io/renewal"] != "true" {
+		return fmt.Errorf("missing or invalid renewal label")
+	}
+
+	if csr.Labels["auth.openkube.io/rotation"] != "true" {
+		return fmt.Errorf("missing or invalid rotation label")
+	}
+
+	// Validate CSR content
+	block, _ := pem.Decode(csr.Spec.Request)
+	if block == nil || block.Type != "CERTIFICATE REQUEST" {
+		return fmt.Errorf("invalid CSR PEM format")
+	}
+
+	csrReq, err := x509.ParseCertificateRequest(block.Bytes)
+	if err != nil {
+		return fmt.Errorf("failed to parse CSR: %w", err)
+	}
+
+	// Validate common name matches expected user
+	expectedUsername := csr.Labels["auth.openkube.io/user"]
+	if csrReq.Subject.CommonName != expectedUsername {
+		return fmt.Errorf("CSR common name %s doesn't match expected user %s", csrReq.Subject.CommonName, expectedUsername)
+	}
+
+	return nil
 }

@@ -6,7 +6,7 @@ spec:
   auth:
     type: x509
     ttl: 10m  # 1 hour certificate
-    renewBefore: "3m"
+    renewBefore: "5m"
     autoRenew: true
   clusterRoles:
     - existingClusterRole: edit
