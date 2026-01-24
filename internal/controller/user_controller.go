@@ -56,12 +56,13 @@ type UserReconciler struct {
 // Admission resources
 // +kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=validatingwebhookconfigurations,verbs=get;patch
 
-// Reconcile orchestrates the user reconciliation process using focused helper methods.
+// Reconcile orchestrates the user reconciliation process as a pure orchestrator.
 // It implements an idempotent update pattern to minimize etcd writes and prevent infinite loops.
 func (r *UserReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := logf.FromContext(ctx)
 	logger.Info("=== START RECONCILE ===", "user", req.Name)
 
+	// 1. Fetch User
 	var user authv1alpha1.User
 	if err := r.Get(ctx, req.NamespacedName, &user); err != nil {
 		logger.Info("User not found, ignoring", "user", req.Name, "error", err)
@@ -72,22 +73,14 @@ func (r *UserReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 
 	// Track status changes to implement idempotent updates
 	statusChanged := false
+	var err error // Declare error variable for use throughout the function
 
 	// Initialize status if needed
 	if changed := r.ensureInitialStatus(&user); changed {
 		statusChanged = true
 	}
 
-	// Validate auth specification
-	if err := auth.ValidateAuthSpec(&user); err != nil {
-		logger.Error(err, "Invalid auth specification")
-		user.Status.Phase = helpers.PhaseError
-		user.Status.Message = fmt.Sprintf("Invalid auth specification: %v", err)
-		statusChanged = true
-		return r.finishReconcile(ctx, &user, statusChanged, err)
-	}
-
-	// Handle deletion
+	// 2. Handle Deletion
 	if !user.DeletionTimestamp.IsZero() {
 		return r.handleDeletion(ctx, &user)
 	}
@@ -97,57 +90,91 @@ func (r *UserReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 
-	// Reconcile RBAC resources
-	if err := r.reconcileRBAC(ctx, &user); err != nil {
+	// 3. Run Business Logic
+	var needsStatusUpdate bool
+	var result *ctrl.Result
+	needsStatusUpdate, result, err = r.reconcileBusinessLogic(ctx, &user)
+	if err != nil {
+		// Error occurred, but we still need to update status if it was changed
+		statusChanged = true // Ensure error status gets persisted
+		// Continue to status update section rather than returning immediately
+	} else if result != nil {
+		return *result, nil
+	} else if needsStatusUpdate {
+		statusChanged = true
+	}
+
+	// 4. Sync NextRenewalAt (Purge if needed)
+	if changed := r.syncStatusFields(ctx, &user); changed {
+		statusChanged = true
+	}
+
+	// 5. ONE Status Update call (if needed)
+	if statusChanged {
+		if updateErr := r.Status().Update(ctx, &user); updateErr != nil {
+			logger.Error(updateErr, "Failed to update user status")
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, updateErr
+		}
+		logger.Info("Status updated successfully")
+	}
+
+	// Handle any error that occurred during business logic after status update
+	if err != nil {
+		return r.handleError(ctx, &user, err)
+	}
+
+	// 6. Calculate Requeue
+	requeueResult := r.calculateRequeue(ctx, &user)
+	logger.Info("=== END RECONCILE ===", "requeueAfter", requeueResult.RequeueAfter)
+	return requeueResult, nil
+}
+
+// reconcileBusinessLogic consolidates the happy path business logic.
+// Returns (needsStatusUpdate bool, result *ctrl.Result, err error).
+func (r *UserReconciler) reconcileBusinessLogic(ctx context.Context, user *authv1alpha1.User) (bool, *ctrl.Result, error) {
+	logger := logf.FromContext(ctx)
+	needsStatusUpdate := false
+
+	// Validate auth specification
+	if err := auth.ValidateAuthSpec(user); err != nil {
+		logger.Error(err, "Invalid auth specification")
+		user.Status.Phase = helpers.PhaseError
+		user.Status.Message = fmt.Sprintf("Invalid auth specification: %v", err)
+		return true, nil, err
+	}
+
+	// Reconcile RBAC resources (no side effects)
+	rbacNeedsUpdate, err := r.reconcileRBAC(ctx, user)
+	if err != nil {
 		user.Status.Phase = helpers.PhaseError
 		user.Status.Message = fmt.Sprintf("Failed to reconcile RBAC: %v", err)
-		statusChanged = true
-		return r.finishReconcile(ctx, &user, statusChanged, err)
+		return true, nil, err
+	}
+	if rbacNeedsUpdate {
+		needsStatusUpdate = true
 	}
 
 	// Reconcile authentication credentials
-	result, err := r.reconcileAuthentication(ctx, &user)
+	err = r.reconcileAuthentication(ctx, user)
 	if err != nil {
 		// Handle specific error cases
 		if strings.Contains(err.Error(), "requeue needed") {
 			logger.Info("Authentication processing needs requeue")
-			return ctrl.Result{RequeueAfter: 3 * time.Second}, nil
+			return false, &ctrl.Result{RequeueAfter: 3 * time.Second}, nil
 		}
 
 		if strings.Contains(err.Error(), "not yet implemented") {
 			user.Status.Phase = helpers.PhaseError
 			user.Status.Message = fmt.Sprintf("Authentication type not implemented: %v", err)
-			statusChanged = true
-			return r.finishReconcile(ctx, &user, statusChanged, err)
+			return true, nil, err
 		}
 
 		user.Status.Phase = helpers.PhaseError
 		user.Status.Message = fmt.Sprintf("Failed to ensure authentication: %v", err)
-		statusChanged = true
-		return r.finishReconcile(ctx, &user, statusChanged, ctrl.Result{RequeueAfter: 5 * time.Second}, nil)
-	}
-	if result != nil {
-		return *result, nil
+		return true, &ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
-	// Sync status fields (including NextRenewalAt management)
-	if changed := r.syncStatusFields(ctx, &user); changed {
-		statusChanged = true
-	}
-
-	// Update status once if any changes occurred
-	if statusChanged {
-		if err := r.Status().Update(ctx, &user); err != nil {
-			logger.Error(err, "Failed to update user status")
-			return ctrl.Result{RequeueAfter: 5 * time.Second}, err
-		}
-		logger.Info("Status updated successfully")
-	}
-
-	// Calculate optimal requeue strategy
-	requeueResult := r.calculateRequeue(ctx, &user)
-	logger.Info("=== END RECONCILE ===", "requeueAfter", requeueResult.RequeueAfter)
-	return requeueResult, nil
+	return needsStatusUpdate, nil, nil
 }
 
 // ensureInitialStatus sets the initial status if not already set.
@@ -200,14 +227,15 @@ func (r *UserReconciler) ensureFinalizer(ctx context.Context, user *authv1alpha1
 }
 
 // reconcileRBAC handles both RoleBindings and ClusterRoleBindings reconciliation.
-func (r *UserReconciler) reconcileRBAC(ctx context.Context, user *authv1alpha1.User) error {
+// Returns true if status needs to be updated, without performing the update itself.
+func (r *UserReconciler) reconcileRBAC(ctx context.Context, user *authv1alpha1.User) (bool, error) {
 	logger := logf.FromContext(ctx)
 
 	// Reconcile RoleBindings
 	logger.Info("Starting RoleBindings reconciliation", "rolesCount", len(user.Spec.Roles))
 	if err := rbac.ReconcileRoleBindings(ctx, r.Client, user); err != nil {
 		logger.Error(err, "Failed to reconcile RoleBindings")
-		return fmt.Errorf("failed to reconcile RoleBindings: %w", err)
+		return false, fmt.Errorf("failed to reconcile RoleBindings: %w", err)
 	}
 	logger.Info("RoleBindings reconciliation completed")
 
@@ -215,25 +243,27 @@ func (r *UserReconciler) reconcileRBAC(ctx context.Context, user *authv1alpha1.U
 	logger.Info("Starting ClusterRoleBindings reconciliation", "clusterRolesCount", len(user.Spec.ClusterRoles))
 	if err := rbac.ReconcileClusterRoleBindings(ctx, r.Client, user); err != nil {
 		logger.Error(err, "Failed to reconcile ClusterRoleBindings")
-		return fmt.Errorf("failed to reconcile ClusterRoleBindings: %w", err)
+		return false, fmt.Errorf("failed to reconcile ClusterRoleBindings: %w", err)
 	}
 	logger.Info("ClusterRoleBindings reconciliation completed")
 
-	// Update status after successful RBAC reconciliation
-	logger.Info("Updating user status after RBAC reconciliation")
-	if err := helpers.UpdateUserStatus(ctx, r.Client, user); err != nil {
-		logger.Error(err, "Failed to update user status")
+	// Update user status fields after successful RBAC reconciliation
+	// This does not perform API writes, only updates the in-memory object
+	logger.Info("Updating user status fields after RBAC reconciliation")
+	statusChanged, err := helpers.UpdateUserStatus(ctx, r.Client, user)
+	if err != nil {
+		logger.Error(err, "Failed to update user status fields")
 		// Don't return error, continue with reconciliation
-	} else {
-		logger.Info("User status updated successfully")
+		return false, nil
 	}
 
-	return nil
+	logger.Info("User status fields updated successfully")
+	return statusChanged, nil // Return whether status actually changed
 }
 
 // reconcileAuthentication manages authentication credentials and handles auth-specific errors.
-// Returns a ctrl.Result pointer if immediate return is needed, otherwise nil.
-func (r *UserReconciler) reconcileAuthentication(ctx context.Context, user *authv1alpha1.User) (*ctrl.Result, error) {
+// Returns only an error; specific error cases are handled by the caller.
+func (r *UserReconciler) reconcileAuthentication(ctx context.Context, user *authv1alpha1.User) error {
 	logger := logf.FromContext(ctx)
 	logger.Info("Starting authentication credential processing")
 
@@ -245,11 +275,11 @@ func (r *UserReconciler) reconcileAuthentication(ctx context.Context, user *auth
 	err := r.AuthManager.Ensure(ctx, user)
 	if err != nil {
 		logger.Error(err, "Failed to ensure authentication credentials")
-		return nil, err
+		return err
 	}
 
 	logger.Info("Authentication credential processing completed")
-	return nil, nil
+	return nil
 }
 
 // syncStatusFields manages status field synchronization, including NextRenewalAt field management.
@@ -274,7 +304,7 @@ func (r *UserReconciler) syncStatusFields(ctx context.Context, user *authv1alpha
 			renewalTime := renewal.CalculateNextRenewal(issuedAt, certExpiry, user.Spec.Auth.RenewBefore)
 			user.Status.NextRenewalAt = &renewalTime
 			changed = true
-			logger.Info("Successfully calculated NextRenewalAt field", "nextRenewalAt", renewalTime.Time.Format(time.RFC3339))
+			logger.Info("Successfully calculated NextRenewalAt field", "nextRenewalAt", renewalTime.Format(time.RFC3339))
 		} else {
 			logger.Error(err, "Failed to parse existing certificate expiry time", "expiryTime", user.Status.ExpiryTime)
 		}
@@ -283,36 +313,20 @@ func (r *UserReconciler) syncStatusFields(ctx context.Context, user *authv1alpha
 	return changed
 }
 
-// finishReconcile handles the final status update and error logging.
-// It supports both error and result-based returns for flexibility.
-func (r *UserReconciler) finishReconcile(ctx context.Context, user *authv1alpha1.User, statusChanged bool, args ...interface{}) (ctrl.Result, error) {
+// handleError handles error cases with proper logging but no API writes.
+// Status updates are handled by the main Reconcile function's single update point.
+func (r *UserReconciler) handleError(ctx context.Context, user *authv1alpha1.User, err error) (ctrl.Result, error) {
 	logger := logf.FromContext(ctx)
 
-	// Update status if changed
-	if statusChanged {
-		if err := r.Status().Update(ctx, user); err != nil {
-			logger.Error(err, "Failed to update user status during error handling")
-			return ctrl.Result{RequeueAfter: 5 * time.Second}, err
-		}
+	// Check if this is a known requeue-only error (not a hard failure)
+	if strings.Contains(err.Error(), "requeue needed") {
+		return ctrl.Result{RequeueAfter: 3 * time.Second}, nil
 	}
 
-	// Handle different argument patterns
-	switch len(args) {
-	case 1:
-		// Single error argument
-		if err, ok := args[0].(error); ok {
-			return ctrl.Result{}, err
-		}
-	case 2:
-		// Result and error arguments
-		if result, ok := args[0].(ctrl.Result); ok {
-			if err, ok := args[1].(error); ok {
-				return result, err
-			}
-		}
-	}
+	logger.Error(err, "Reconciliation failed", "phase", user.Status.Phase)
 
-	return ctrl.Result{}, nil
+	// Return a standard 5s requeue for errors
+	return ctrl.Result{RequeueAfter: 5 * time.Second}, err
 }
 
 // calculateRequeue determines the optimal requeue strategy based on user state and configuration.
@@ -326,7 +340,7 @@ func (r *UserReconciler) calculateRequeue(ctx context.Context, user *authv1alpha
 	}
 
 	// Smart requeue for auto-renewal enabled users
-	if user.Spec.Auth.AutoRenew && user.Status.Phase == "Active" {
+	if user.Spec.Auth.AutoRenew && user.Status.Phase == helpers.PhaseActive {
 		requeueAfter, err := r.calculateSmartRequeue(ctx, user)
 		if err != nil {
 			logger.Error(err, "Failed to calculate smart requeue, using default")
@@ -337,18 +351,16 @@ func (r *UserReconciler) calculateRequeue(ctx context.Context, user *authv1alpha
 	}
 
 	// Legacy expiry-based requeue for non-auto-renewal users
-	if user.Status.Phase == "Active" && user.Status.ExpiryTime != "" {
+	if user.Status.Phase == helpers.PhaseActive && user.Status.ExpiryTime != "" {
 		if expiryTime, err := time.Parse(time.RFC3339, user.Status.ExpiryTime); err == nil {
 			timeUntilExpiry := time.Until(expiryTime)
 			logger.Info("Time until expiry", "duration", timeUntilExpiry)
 
 			if timeUntilExpiry <= 0 {
-				// User has expired, mark as expired and update status
-				logger.Info("User has expired, updating status")
-				user.Status.Phase = helpers.PhaseExpired
-				user.Status.Message = "User access has expired"
-				// Note: Status update will be handled by the caller
-				return ctrl.Result{}
+				// User has expired - this should trigger a status update in the next reconciliation
+				logger.Info("User has expired, will be marked as expired in next reconciliation")
+				// Don't modify status here - let the next reconciliation handle it properly
+				return ctrl.Result{Requeue: true} // Immediate requeue to handle expiry
 			} else if timeUntilExpiry < 24*time.Hour {
 				// Requeue to check expiry more frequently
 				logger.Info("User expires soon, requeueing in 1 hour")

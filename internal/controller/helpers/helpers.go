@@ -26,6 +26,7 @@ const (
 	PhaseError   = "Error"
 	PhaseExpired = "Expired"
 	PhaseReady   = "Ready"
+	PhaseActive  = "Active"
 )
 
 // GetKubeUserNamespace returns the namespace where all KubeUser resources should be created
@@ -50,94 +51,75 @@ func CreateOrUpdate(ctx context.Context, r client.Client, obj client.Object) err
 	return r.Update(ctx, obj)
 }
 
-// UpdateUserStatus calculates and updates the user status based on current state
-func UpdateUserStatus(ctx context.Context, r client.Client, user *authv1alpha1.User) error {
+// UpdateUserStatus calculates and updates the user status fields in memory based on current state.
+// Returns true if any status field was modified, false if the status was already correct.
+// This is a pure in-memory mutator that performs no API writes.
+func UpdateUserStatus(ctx context.Context, r client.Client, user *authv1alpha1.User) (bool, error) {
 	logger := logf.FromContext(ctx)
-	logger.Info("Updating user status", "name", user.Name)
+	logger.Info("Calculating user status", "name", user.Name)
+
+	// Track if any changes were made
+	changed := false
+
+	// Calculate new phase and message
+	var newPhase, newMessage string
 
 	// Check if user certificate has expired (only if ExpiryTime is set)
 	if user.Status.ExpiryTime != "" {
 		if expiry, err := time.Parse(time.RFC3339, user.Status.ExpiryTime); err == nil {
 			if time.Now().After(expiry) {
-				user.Status.Phase = PhaseExpired
-				user.Status.Message = "User certificate has expired"
+				newPhase = PhaseExpired
+				newMessage = "User certificate has expired"
 				logger.Info("User certificate has expired", "expiry", user.Status.ExpiryTime)
 			} else {
-				// Certificate is still valid, set user as active
-				SetActiveStatus(user)
+				// Certificate is still valid, calculate active status message
+				// We hardcode PhaseActive to satisfy 'unparam' linter
+				newPhase = PhaseActive
+				newMessage = calculateActiveStatus(user)
 			}
 		} else {
 			logger.Error(err, "Failed to parse expiry time", "expiryTime", user.Status.ExpiryTime)
-			// If we can't parse expiry time, assume user is active
-			SetActiveStatus(user)
+			// If we can't parse expiry time, fallback to Active
+			newPhase = PhaseActive
+			newMessage = calculateActiveStatus(user)
 		}
 	} else {
-		// No expiry time set yet (certificate not issued), set user as active
-		SetActiveStatus(user)
+		// No expiry time set yet, set user as active
+		newPhase = PhaseActive
+		newMessage = calculateActiveStatus(user)
 	}
 
-	// Add condition for better status tracking
-	now := metav1.NewTime(time.Now())
-	conditionType := PhaseReady
-	conditionStatus := metav1.ConditionTrue
-	conditionReason := "UserProvisioned"
-	conditionMessage := user.Status.Message
-
-	switch user.Status.Phase {
-	case "Error":
-		conditionType = PhaseReady
-		conditionStatus = metav1.ConditionFalse
-		conditionReason = "ProvisioningFailed"
-	case "Expired":
-		conditionType = PhaseReady
-		conditionStatus = metav1.ConditionFalse
-		conditionReason = "CertificateExpired"
-	case "Pending":
-		conditionType = PhaseReady
-		conditionStatus = metav1.ConditionFalse
-		conditionReason = "Provisioning"
+	// Semantic comparison: only update if values actually changed
+	if user.Status.Phase != newPhase {
+		user.Status.Phase = newPhase
+		changed = true
+		logger.Info("Phase changed", "oldPhase", user.Status.Phase, "newPhase", newPhase)
 	}
 
-	// Update or add condition
-	updatedConditions := []metav1.Condition{}
-	conditionFound := false
-	for _, condition := range user.Status.Conditions {
-		if condition.Type == conditionType {
-			condition.Status = conditionStatus
-			condition.Reason = conditionReason
-			condition.Message = conditionMessage
-			condition.LastTransitionTime = now
-			conditionFound = true
-		}
-		updatedConditions = append(updatedConditions, condition)
+	if user.Status.Message != newMessage {
+		user.Status.Message = newMessage
+		changed = true
+		logger.Info("Message changed", "newMessage", newMessage)
 	}
 
-	if !conditionFound {
-		newCondition := metav1.Condition{
-			Type:               conditionType,
-			Status:             conditionStatus,
-			Reason:             conditionReason,
-			Message:            conditionMessage,
-			LastTransitionTime: now,
-		}
-		updatedConditions = append(updatedConditions, newCondition)
+	// Calculate condition updates
+	conditionChanged := updateStatusCondition(user, newPhase, newMessage)
+	if conditionChanged {
+		changed = true
 	}
-	user.Status.Conditions = updatedConditions
 
-	logger.Info("Updating status", "phase", user.Status.Phase, "expiry", user.Status.ExpiryTime, "message", user.Status.Message)
-	err := r.Status().Update(ctx, user)
-	if err != nil {
-		logger.Error(err, "Failed to update user status")
-		return err
+	if changed {
+		logger.Info("Status fields updated in memory", "phase", user.Status.Phase, "message", user.Status.Message)
+	} else {
+		logger.Info("Status fields unchanged", "phase", user.Status.Phase)
 	}
-	logger.Info("Successfully updated user status")
-	return nil
+
+	return changed, nil
 }
 
-// SetActiveStatus sets the user status to active based on role assignments
-func SetActiveStatus(user *authv1alpha1.User) {
-	user.Status.Phase = "Active"
-
+// calculateActiveStatus determines the descriptive message for an active user based on role assignments.
+// The 'phase' return was removed to satisfy 'unparam' linting as it was always "Active".
+func calculateActiveStatus(user *authv1alpha1.User) string {
 	// Count different types of bindings
 	var namespacedRoles, namespacedClusterRoles int
 	for _, role := range user.Spec.Roles {
@@ -151,11 +133,10 @@ func SetActiveStatus(user *authv1alpha1.User) {
 	totalBindings := namespacedRoles + namespacedClusterRoles + clusterWideRoles
 
 	if totalBindings == 0 {
-		user.Status.Message = "No role bindings configured"
-		return
+		return "No role bindings configured"
 	}
 
-	// Build detailed message
+	// Build detailed message parts
 	var parts []string
 	if namespacedRoles > 0 {
 		parts = append(parts, fmt.Sprintf("%d namespace-scoped Role(s)", namespacedRoles))
@@ -167,13 +148,80 @@ func SetActiveStatus(user *authv1alpha1.User) {
 		parts = append(parts, fmt.Sprintf("%d cluster-wide ClusterRole(s)", clusterWideRoles))
 	}
 
-	if len(parts) == 1 {
-		user.Status.Message = fmt.Sprintf("Active with %s", parts[0])
-	} else if len(parts) == 2 {
-		user.Status.Message = fmt.Sprintf("Active with %s and %s", parts[0], parts[1])
-	} else {
-		user.Status.Message = fmt.Sprintf("Active with %s, %s, and %s", parts[0], parts[1], parts[2])
+	// Join parts into a human-readable sentence
+	switch len(parts) {
+	case 1:
+		return fmt.Sprintf("%s with %s", PhaseActive, parts[0])
+	case 2:
+		return fmt.Sprintf("%s with %s and %s", PhaseActive, parts[0], parts[1])
+	case 3:
+		return fmt.Sprintf("%s with %s, %s, and %s", PhaseActive, parts[0], parts[1], parts[2])
+	default:
+		return PhaseActive
 	}
+}
+
+// updateStatusCondition updates the status condition based on the current phase and message.
+// Returns true if the condition was changed.
+func updateStatusCondition(user *authv1alpha1.User, phase, message string) bool {
+	now := metav1.NewTime(time.Now())
+	conditionType := PhaseReady
+	conditionStatus := metav1.ConditionTrue
+	conditionReason := "UserProvisioned"
+	conditionMessage := message
+
+	switch phase {
+	case "Error":
+		conditionStatus = metav1.ConditionFalse
+		conditionReason = "ProvisioningFailed"
+	case "Expired":
+		conditionStatus = metav1.ConditionFalse
+		conditionReason = "CertificateExpired"
+	case "Pending":
+		conditionStatus = metav1.ConditionFalse
+		conditionReason = "Provisioning"
+	}
+
+	// Find existing condition
+	for i, condition := range user.Status.Conditions {
+		if condition.Type == conditionType {
+			// Check if condition needs updating
+			if condition.Status != conditionStatus ||
+				condition.Reason != conditionReason ||
+				condition.Message != conditionMessage {
+
+				user.Status.Conditions[i].Status = conditionStatus
+				user.Status.Conditions[i].Reason = conditionReason
+				user.Status.Conditions[i].Message = conditionMessage
+				user.Status.Conditions[i].LastTransitionTime = now
+				return true
+			}
+			return false // Condition unchanged
+		}
+	}
+
+	// Condition not found, add new one
+	newCondition := metav1.Condition{
+		Type:               conditionType,
+		Status:             conditionStatus,
+		Reason:             conditionReason,
+		Message:            conditionMessage,
+		LastTransitionTime: now,
+	}
+	user.Status.Conditions = append(user.Status.Conditions, newCondition)
+	return true
+}
+
+// SetActiveStatus sets the user status to active based on role assignments.
+// This function is kept for backward compatibility but now uses the pure
+// calculateActiveStatus helper which returns only the message string.
+func SetActiveStatus(user *authv1alpha1.User) {
+	// FIX: Receive only the single message string returned by the helper
+	message := calculateActiveStatus(user)
+
+	// Explicitly set the phase to PhaseActive to satisfy linting requirements
+	user.Status.Phase = PhaseActive
+	user.Status.Message = message
 }
 
 // RoleBindingMatches checks if two RoleBindings are functionally equivalent
