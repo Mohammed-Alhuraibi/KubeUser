@@ -47,47 +47,37 @@ func NewRenewalCalculator() *RenewalCalculator {
 func (rc *RenewalCalculator) CalculateRenewalTime(user *authv1alpha1.User, certExpiry time.Time, certDuration time.Duration) (time.Time, error) {
 	var renewalTime time.Time
 
-	// Validate inputs
-	if certDuration <= 0 {
-		return time.Time{}, fmt.Errorf("certificate duration must be positive, got: %v", certDuration)
+	if certDuration <= 0 || certExpiry.IsZero() {
+		return time.Time{}, fmt.Errorf("invalid duration or expiry")
 	}
 
-	if certExpiry.IsZero() {
-		return time.Time{}, fmt.Errorf("certificate expiry time cannot be zero")
-	}
-
-	// Step 1: Check for custom renewBefore setting
-	if user.Spec.Auth.RenewBefore != nil {
+	// Step 1: Prioritize custom renewBefore
+	if user.Spec.Auth.RenewBefore != nil && user.Spec.Auth.RenewBefore.Duration > 0 {
 		customRenewBefore := user.Spec.Auth.RenewBefore.Duration
 
-		// Validate that renewBefore is less than certificate duration
+		// Safety Check: If RenewBefore is actually longer than the TTL,
+		// we force it to 50% so the cert has at least some life.
 		if customRenewBefore >= certDuration {
-			return time.Time{}, fmt.Errorf("renewBefore (%v) must be less than certificate TTL (%v)", customRenewBefore, certDuration)
-		}
-
-		// Additional validation for very short certificates
-		if customRenewBefore <= 0 {
-			return time.Time{}, fmt.Errorf("renewBefore must be positive, got: %v", customRenewBefore)
+			customRenewBefore = time.Duration(float64(certDuration) * 0.5)
 		}
 
 		renewalTime = certExpiry.Add(-customRenewBefore)
 	} else {
-		// Step 2: Apply 33% rule (cert-manager style)
+		// Step 2: Fallback to 33% rule
 		renewalBuffer := time.Duration(float64(certDuration) * DefaultRenewalPercentage)
 		renewalTime = certExpiry.Add(-renewalBuffer)
 	}
 
-	// Step 3: Apply safety floor for short-lived certificates
-	safetyFloorTime := certExpiry.Add(-rc.MinRenewalBuffer)
-	if renewalTime.After(safetyFloorTime) {
-		renewalTime = safetyFloorTime
+	// Step 3: Global Safety Floor
+	// Ensure we NEVER renew later than 2 minutes before expiry
+	latestAllowedRenewal := certExpiry.Add(-rc.MinRenewalBuffer)
+	if renewalTime.After(latestAllowedRenewal) {
+		renewalTime = latestAllowedRenewal
 	}
 
-	// Step 4: Ensure renewal time is not in the past
-	now := time.Now()
-	if renewalTime.Before(now) {
-		// Certificate needs immediate renewal
-		renewalTime = now
+	// Step 4: Don't return a time in the past
+	if renewalTime.Before(time.Now()) {
+		return time.Now(), nil
 	}
 
 	return renewalTime, nil
