@@ -15,7 +15,7 @@ func TestX509Provider_Ensure(t *testing.T) {
 	_ = authv1alpha1.AddToScheme(scheme)
 
 	client := fake.NewClientBuilder().WithScheme(scheme).Build()
-	provider := NewX509Provider(client)
+	provider := NewX509Provider(client, nil) // nil event recorder for tests
 
 	user := &authv1alpha1.User{
 		ObjectMeta: metav1.ObjectMeta{
@@ -33,7 +33,7 @@ func TestX509Provider_Ensure(t *testing.T) {
 
 	// Test ensure - this will fail in unit tests due to missing cluster dependencies
 	// but we can verify the validation logic works
-	err := provider.Ensure(ctx, user)
+	_, _, err := provider.Ensure(ctx, user)
 	// We expect this to fail due to missing cluster resources in unit test
 	if err != nil {
 		t.Logf("X509 ensure failed as expected in unit test: %v", err)
@@ -41,7 +41,7 @@ func TestX509Provider_Ensure(t *testing.T) {
 
 	// Test with invalid TTL
 	user.Spec.Auth.TTL = "-1h"
-	err = provider.Ensure(ctx, user)
+	_, _, err = provider.Ensure(ctx, user)
 	if err == nil {
 		t.Error("Should fail with invalid duration")
 	}
@@ -52,7 +52,7 @@ func TestX509Provider_Revoke(t *testing.T) {
 	_ = authv1alpha1.AddToScheme(scheme)
 
 	client := fake.NewClientBuilder().WithScheme(scheme).Build()
-	provider := NewX509Provider(client)
+	provider := NewX509Provider(client, nil) // nil event recorder for tests
 
 	user := &authv1alpha1.User{
 		ObjectMeta: metav1.ObjectMeta{

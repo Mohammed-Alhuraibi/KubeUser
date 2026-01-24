@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	authv1alpha1 "github.com/openkube-hub/KubeUser/api/v1alpha1"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -29,7 +30,7 @@ func NewOIDCProvider(c client.Client) *OIDCProvider {
 
 // Ensure is a stub implementation for OIDC authentication
 // TODO: Implement actual OIDC token issuance and management
-func (p *OIDCProvider) Ensure(ctx context.Context, user *authv1alpha1.User) error {
+func (p *OIDCProvider) Ensure(ctx context.Context, user *authv1alpha1.User) (bool, *ctrl.Result, error) {
 	logger := logf.FromContext(ctx)
 	logger.Info("OIDC authentication ensure called (STUB)", "user", user.Name)
 
@@ -44,7 +45,7 @@ func (p *OIDCProvider) Ensure(ctx context.Context, user *authv1alpha1.User) erro
 	logger.Info("OIDC ensure completed (no-op stub)", "user", user.Name)
 
 	// For now, return an error indicating this is not implemented
-	return fmt.Errorf("OIDC authentication is not yet implemented (stub only)")
+	return false, nil, fmt.Errorf("OIDC authentication is not yet implemented (stub only)")
 }
 
 // Revoke is a stub implementation for OIDC authentication cleanup

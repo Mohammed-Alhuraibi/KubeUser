@@ -8,6 +8,8 @@ import (
 	authv1alpha1 "github.com/openkube-hub/KubeUser/api/v1alpha1"
 	"github.com/openkube-hub/KubeUser/internal/controller/certs"
 	"github.com/openkube-hub/KubeUser/internal/controller/renewal"
+	"k8s.io/client-go/tools/record"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -20,22 +22,26 @@ type X509Provider struct {
 }
 
 // NewX509Provider creates a new x509 auth provider
-func NewX509Provider(c client.Client) *X509Provider {
+func NewX509Provider(c client.Client, eventRecorder record.EventRecorder) *X509Provider {
 	return &X509Provider{
 		client:            c,
 		renewalCalculator: renewal.NewRenewalCalculator(),
-		rotationManager:   renewal.NewRotationManager(c),
+		rotationManager:   renewal.NewRotationManager(c, eventRecorder),
 	}
 }
 
-// Ensure creates or updates x509 certificates and kubeconfig for the user
-func (p *X509Provider) Ensure(ctx context.Context, user *authv1alpha1.User) error {
+// Ensure creates or updates x509 certificates and kubeconfig for the user.
+// Returns (bool, *ctrl.Result, error) where:
+// - bool: true if status fields were changed
+// - *ctrl.Result: non-nil if immediate requeue is needed
+// - error: actual error that should stop reconciliation
+func (p *X509Provider) Ensure(ctx context.Context, user *authv1alpha1.User) (bool, *ctrl.Result, error) {
 	logger := logf.FromContext(ctx)
 	logger.Info("Ensuring x509 authentication", "user", user.Name, "autoRenew", user.Spec.Auth.AutoRenew)
 
 	// Validate auth spec
 	if err := ValidateAuthSpec(user); err != nil {
-		return fmt.Errorf("invalid auth spec: %v", err)
+		return false, nil, fmt.Errorf("invalid auth spec: %v", err)
 	}
 
 	// Get the duration for certificate validity
@@ -51,46 +57,45 @@ func (p *X509Provider) Ensure(ctx context.Context, user *authv1alpha1.User) erro
 		} else if needsRenewal {
 			logger.Info("Certificate needs renewal, starting rotation process")
 
-			// Update status to indicate renewal is starting
-			user.Status.Phase = "Renewing"
-			user.Status.Message = "Starting certificate renewal"
-			if err := p.client.Status().Update(ctx, user); err != nil {
-				logger.Error(err, "Failed to update status for renewal")
-			}
-
-			// Perform atomic certificate rotation
-			err = p.rotationManager.RotateUserCertificate(ctx, user, duration)
+			// Perform atomic certificate rotation with new signature
+			statusChanged, result, err := p.rotationManager.RotateUserCertificate(ctx, user, duration)
 			if err != nil {
 				logger.Error(err, "Certificate rotation failed")
 				user.Status.Phase = "Error"
 				user.Status.Message = fmt.Sprintf("Certificate renewal failed: %v", err)
-				_ = p.client.Status().Update(ctx, user)
 
-				// Check if this is a requeue error
-				if isRequeueError(err) {
-					return fmt.Errorf("certificate renewal in progress, requeue needed")
-				}
-				return fmt.Errorf("certificate renewal failed: %w", err)
+				// Return status change and error (no requeue for actual errors)
+				return true, nil, fmt.Errorf("certificate renewal failed: %w", err)
 			}
 
-			logger.Info("Certificate rotation completed successfully")
-			return nil
+			// Handle immediate requeue if needed (e.g., Shadow Secret created)
+			if result != nil {
+				logger.Info("Certificate rotation requires immediate requeue")
+				return statusChanged, result, nil
+			}
+
+			// If status was changed but no requeue needed, rotation completed successfully
+			if statusChanged {
+				logger.Info("Certificate rotation completed successfully")
+			}
+
+			return statusChanged, nil, nil
 		}
 	}
 
 	// Use existing certificate logic for initial creation or non-renewal updates
 	requeue, err := certs.EnsureCertKubeconfigWithDuration(ctx, p.client, user, duration)
 	if err != nil {
-		return fmt.Errorf("failed to ensure certificate kubeconfig: %v", err)
+		return false, nil, fmt.Errorf("failed to ensure certificate kubeconfig: %v", err)
 	}
 
 	if requeue {
 		logger.Info("Certificate processing requires requeue")
-		return fmt.Errorf("certificate processing in progress, requeue needed")
+		return false, &ctrl.Result{Requeue: true}, nil
 	}
 
 	logger.Info("Successfully ensured x509 authentication", "user", user.Name)
-	return nil
+	return false, nil, nil
 }
 
 // checkIfRenewalNeeded determines if the certificate needs renewal

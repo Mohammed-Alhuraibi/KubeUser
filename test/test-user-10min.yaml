@@ -5,8 +5,8 @@ metadata:
 spec:
   auth:
     type: x509
-    ttl: 10m  # 1 hour certificate
-    renewBefore: "5m"
+    ttl: 12m  # 1 hour certificate
+    renewBefore: "9m"
     autoRenew: true
   clusterRoles:
     - existingClusterRole: edit

@@ -173,7 +173,7 @@ func TestManager(t *testing.T) {
 	_ = authv1alpha1.AddToScheme(scheme)
 
 	client := fake.NewClientBuilder().WithScheme(scheme).Build()
-	manager := NewManager(client)
+	manager := NewManager(client, nil) // nil event recorder for tests
 
 	user := &authv1alpha1.User{
 		ObjectMeta: metav1.ObjectMeta{
@@ -190,7 +190,7 @@ func TestManager(t *testing.T) {
 	ctx := context.Background()
 
 	// Test x509 provider (should work but may fail due to missing dependencies)
-	err := manager.Ensure(ctx, user)
+	_, _, err := manager.Ensure(ctx, user)
 	// We expect this to fail in unit tests due to missing cluster dependencies
 	// In integration tests, this would be properly tested
 	if err == nil {
@@ -201,7 +201,7 @@ func TestManager(t *testing.T) {
 
 	// Test OIDC provider (should fail with not implemented)
 	user.Spec.Auth.Type = AuthTypeOIDC
-	err = manager.Ensure(ctx, user)
+	_, _, err = manager.Ensure(ctx, user)
 	if err == nil {
 		t.Error("OIDC ensure should fail with not implemented error")
 	}

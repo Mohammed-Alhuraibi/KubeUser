@@ -32,7 +32,7 @@ func TestOIDCProvider_Ensure(t *testing.T) {
 	ctx := context.Background()
 
 	// Test ensure - should fail with not implemented error
-	err := provider.Ensure(ctx, user)
+	_, _, err := provider.Ensure(ctx, user)
 	if err == nil {
 		t.Error("OIDC ensure should fail with not implemented error")
 	}

@@ -57,7 +57,15 @@ func CreateOrUpdate(ctx context.Context, r client.Client, obj client.Object) err
 // This is a pure in-memory mutator that performs no API writes.
 func UpdateUserStatus(ctx context.Context, r client.Client, user *authv1alpha1.User) (bool, error) {
 	logger := logf.FromContext(ctx)
-	logger.Info("Calculating user status", "name", user.Name)
+	logger.Info("Calculating user status", "name", user.Name, "currentPhase", user.Status.Phase)
+
+	// CRITICAL: Protect the Renewing state from being overwritten
+	// When a user is in the Renewing phase, the rotation state machine owns the status
+	// and RBAC reconciliation must not interfere with it
+	if user.Status.Phase == "Renewing" {
+		logger.Info("User is in Renewing phase, skipping status update to preserve rotation state")
+		return false, nil
+	}
 
 	// Track if any changes were made
 	changed := false
@@ -285,4 +293,21 @@ func RemoveString(slice []string, s string) []string {
 		}
 	}
 	return result
+}
+
+// SemanticTimePtrMatch compares two *metav1.Time pointers safely, handling nil cases.
+// Returns true if both pointers are semantically equal (both nil or both point to equal times).
+func SemanticTimePtrMatch(a, b *metav1.Time) bool {
+	// Both nil - they match
+	if a == nil && b == nil {
+		return true
+	}
+
+	// One nil, one not - they don't match
+	if a == nil || b == nil {
+		return false
+	}
+
+	// Both non-nil - compare the time values
+	return a.Time.Equal(b.Time)
 }

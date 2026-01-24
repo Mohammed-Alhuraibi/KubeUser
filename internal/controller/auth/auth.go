@@ -7,6 +7,8 @@ import (
 	"time"
 
 	authv1alpha1 "github.com/openkube-hub/KubeUser/api/v1alpha1"
+	"k8s.io/client-go/tools/record"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -19,7 +21,11 @@ const (
 // Provider defines the interface for authentication providers
 type Provider interface {
 	// Ensure creates or updates authentication credentials for the user
-	Ensure(ctx context.Context, user *authv1alpha1.User) error
+	// Returns (bool, *ctrl.Result, error) where:
+	// - bool: true if status fields were changed
+	// - *ctrl.Result: non-nil if immediate requeue is needed
+	// - error: actual error that should stop reconciliation
+	Ensure(ctx context.Context, user *authv1alpha1.User) (bool, *ctrl.Result, error)
 
 	// Revoke removes authentication credentials for the user
 	Revoke(ctx context.Context, user *authv1alpha1.User) error
@@ -27,30 +33,36 @@ type Provider interface {
 
 // Manager handles routing to appropriate auth providers
 type Manager struct {
-	client client.Client
-	x509   Provider
-	oidc   Provider
+	client        client.Client
+	eventRecorder record.EventRecorder
+	x509          Provider
+	oidc          Provider
 }
 
-// NewManager creates a new auth manager with the provided client
-func NewManager(c client.Client) *Manager {
+// NewManager creates a new auth manager with the provided client and event recorder
+func NewManager(c client.Client, eventRecorder record.EventRecorder) *Manager {
 	return &Manager{
-		client: c,
-		x509:   NewX509Provider(c),
-		oidc:   NewOIDCProvider(c),
+		client:        c,
+		eventRecorder: eventRecorder,
+		x509:          NewX509Provider(c, eventRecorder),
+		oidc:          NewOIDCProvider(c),
 	}
 }
 
-// Ensure delegates to the appropriate auth provider based on user spec
-func (m *Manager) Ensure(ctx context.Context, user *authv1alpha1.User) error {
+// Ensure delegates to the appropriate auth provider based on user spec.
+// Returns (bool, *ctrl.Result, error) where:
+// - bool: true if status fields were changed
+// - *ctrl.Result: non-nil if immediate requeue is needed
+// - error: actual error that should stop reconciliation
+func (m *Manager) Ensure(ctx context.Context, user *authv1alpha1.User) (bool, *ctrl.Result, error) {
 	// Validate renewal configuration first
 	if err := ValidateRenewalConfig(user); err != nil {
-		return fmt.Errorf("invalid renewal configuration: %w", err)
+		return false, nil, fmt.Errorf("invalid renewal configuration: %w", err)
 	}
 
 	provider, err := m.getProvider(user)
 	if err != nil {
-		return err
+		return false, nil, err
 	}
 
 	return provider.Ensure(ctx, user)

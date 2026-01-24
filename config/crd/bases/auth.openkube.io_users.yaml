@@ -239,6 +239,11 @@ spec:
                   - timestamp
                   type: object
                 type: array
+              rotationStep:
+                description: |-
+                  RotationStep provides granular visibility into certificate rotation progress
+                  Values: GeneratingKey, CreatingCSR, WaitingForApproval, PerformingAtomicFlip, Finalizing
+                type: string
             type: object
         required:
         - spec

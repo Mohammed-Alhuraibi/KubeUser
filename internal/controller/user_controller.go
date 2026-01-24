@@ -22,6 +22,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -31,6 +32,7 @@ import (
 type UserReconciler struct {
 	client.Client
 	Scheme            *runtime.Scheme
+	EventRecorder     record.EventRecorder
 	AuthManager       *auth.Manager
 	RenewalCalculator *renewal.RenewalCalculator
 }
@@ -92,17 +94,16 @@ func (r *UserReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 
 	// 3. Run Business Logic
 	var needsStatusUpdate bool
-	var result *ctrl.Result
-	needsStatusUpdate, result, err = r.reconcileBusinessLogic(ctx, &user)
+	var pendingResult *ctrl.Result
+	needsStatusUpdate, pendingResult, err = r.reconcileBusinessLogic(ctx, &user)
 	if err != nil {
 		// Error occurred, but we still need to update status if it was changed
 		statusChanged = true // Ensure error status gets persisted
 		// Continue to status update section rather than returning immediately
-	} else if result != nil {
-		return *result, nil
 	} else if needsStatusUpdate {
 		statusChanged = true
 	}
+	// Note: pendingResult is captured but not returned yet - we must persist status first
 
 	// 4. Sync NextRenewalAt (Purge if needed)
 	if changed := r.syncStatusFields(ctx, &user); changed {
@@ -115,7 +116,7 @@ func (r *UserReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 			logger.Error(updateErr, "Failed to update user status")
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, updateErr
 		}
-		logger.Info("Status updated successfully")
+		logger.Info("Status updated successfully", "phase", user.Status.Phase, "rotationStep", user.Status.RotationStep)
 	}
 
 	// Handle any error that occurred during business logic after status update
@@ -123,9 +124,15 @@ func (r *UserReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return r.handleError(ctx, &user, err)
 	}
 
-	// 6. Calculate Requeue
+	// 6. Return pending result if one was captured (e.g., immediate requeue for Shadow Secret creation)
+	if pendingResult != nil {
+		logger.Info("=== END RECONCILE (PENDING REQUEUE) ===", "requeueAfter", pendingResult.RequeueAfter, "requeue", pendingResult.Requeue)
+		return *pendingResult, nil
+	}
+
+	// 7. Calculate Requeue
 	requeueResult := r.calculateRequeue(ctx, &user)
-	logger.Info("=== END RECONCILE ===", "requeueAfter", requeueResult.RequeueAfter)
+	logger.Info("=== END RECONCILE ===", "requeueAfter", requeueResult.RequeueAfter, "statusCommitted", statusChanged)
 	return requeueResult, nil
 }
 
@@ -155,14 +162,9 @@ func (r *UserReconciler) reconcileBusinessLogic(ctx context.Context, user *authv
 	}
 
 	// Reconcile authentication credentials
-	err = r.reconcileAuthentication(ctx, user)
+	authChanged, authResult, err := r.reconcileAuthentication(ctx, user)
 	if err != nil {
 		// Handle specific error cases
-		if strings.Contains(err.Error(), "requeue needed") {
-			logger.Info("Authentication processing needs requeue")
-			return false, &ctrl.Result{RequeueAfter: 3 * time.Second}, nil
-		}
-
 		if strings.Contains(err.Error(), "not yet implemented") {
 			user.Status.Phase = helpers.PhaseError
 			user.Status.Message = fmt.Sprintf("Authentication type not implemented: %v", err)
@@ -172,6 +174,17 @@ func (r *UserReconciler) reconcileBusinessLogic(ctx context.Context, user *authv
 		user.Status.Phase = helpers.PhaseError
 		user.Status.Message = fmt.Sprintf("Failed to ensure authentication: %v", err)
 		return true, &ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+
+	// Handle immediate requeue if needed (e.g., Shadow Secret created)
+	if authResult != nil {
+		logger.Info("Authentication processing requires immediate requeue")
+		return authChanged, authResult, nil
+	}
+
+	// Aggregate authentication changes
+	if authChanged {
+		needsStatusUpdate = true
 	}
 
 	return needsStatusUpdate, nil, nil
@@ -262,17 +275,27 @@ func (r *UserReconciler) reconcileRBAC(ctx context.Context, user *authv1alpha1.U
 }
 
 // reconcileAuthentication manages authentication credentials and handles auth-specific errors.
-// Returns only an error; specific error cases are handled by the caller.
-func (r *UserReconciler) reconcileAuthentication(ctx context.Context, user *authv1alpha1.User) error {
+// reconcileAuthentication manages authentication credentials and handles auth-specific errors.
+// Returns (bool, *ctrl.Result, error) where:
+// - bool: true if status fields were changed
+// - *ctrl.Result: non-nil if immediate requeue is needed
+// - error: actual error that should stop reconciliation
+func (r *UserReconciler) reconcileAuthentication(ctx context.Context, user *authv1alpha1.User) (bool, *ctrl.Result, error) {
 	logger := logf.FromContext(ctx)
 	logger.Info("Starting authentication credential processing")
 
 	// Initialize auth manager if needed
 	if r.AuthManager == nil {
-		r.AuthManager = auth.NewManager(r.Client)
+		r.AuthManager = auth.NewManager(r.Client, r.EventRecorder)
 	}
 
-	err := r.AuthManager.Ensure(ctx, user)
+	// Capture old values before authentication processing
+	oldExpiryTime := user.Status.ExpiryTime
+	oldNextRenewalAt := user.Status.NextRenewalAt
+	oldPhase := user.Status.Phase
+	oldRotationStep := user.Status.RotationStep
+
+	statusChanged, result, err := r.AuthManager.Ensure(ctx, user)
 	if err != nil {
 		// Don't log expected requeue errors as ERROR level
 		if strings.Contains(err.Error(), "requeue needed") {
@@ -280,11 +303,42 @@ func (r *UserReconciler) reconcileAuthentication(ctx context.Context, user *auth
 		} else {
 			logger.Error(err, "Failed to ensure authentication credentials")
 		}
-		return err
+
+		// Check if status was changed during authentication processing (e.g., Phase set to "Renewing")
+		additionalChanges := oldPhase != user.Status.Phase ||
+			oldExpiryTime != user.Status.ExpiryTime ||
+			oldRotationStep != user.Status.RotationStep ||
+			!helpers.SemanticTimePtrMatch(oldNextRenewalAt, user.Status.NextRenewalAt)
+
+		return statusChanged || additionalChanges, result, err
+	}
+
+	// Compare old vs new values to detect additional changes
+	expiryChanged := oldExpiryTime != user.Status.ExpiryTime
+	renewalChanged := !helpers.SemanticTimePtrMatch(oldNextRenewalAt, user.Status.NextRenewalAt)
+	phaseChanged := oldPhase != user.Status.Phase
+	rotationStepChanged := oldRotationStep != user.Status.RotationStep
+
+	additionalChanges := expiryChanged || renewalChanged || phaseChanged || rotationStepChanged
+	totalStatusChanged := statusChanged || additionalChanges
+
+	if totalStatusChanged {
+		logger.Info("Authentication processing updated status fields",
+			"providerChanged", statusChanged,
+			"expiryChanged", expiryChanged,
+			"renewalChanged", renewalChanged,
+			"phaseChanged", phaseChanged,
+			"rotationStepChanged", rotationStepChanged,
+			"oldExpiry", oldExpiryTime,
+			"newExpiry", user.Status.ExpiryTime,
+			"oldPhase", oldPhase,
+			"newPhase", user.Status.Phase,
+			"oldRotationStep", oldRotationStep,
+			"newRotationStep", user.Status.RotationStep)
 	}
 
 	logger.Info("Authentication credential processing completed")
-	return nil
+	return totalStatusChanged, result, nil
 }
 
 // syncStatusFields manages status field synchronization, including NextRenewalAt field management.
@@ -453,9 +507,14 @@ func (r *UserReconciler) calculateSmartRequeue(ctx context.Context, user *authv1
 
 // SetupWithManager wires the controller
 func (r *UserReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Initialize event recorder if not already set
+	if r.EventRecorder == nil {
+		r.EventRecorder = mgr.GetEventRecorderFor("user-controller")
+	}
+
 	// Initialize auth manager
 	if r.AuthManager == nil {
-		r.AuthManager = auth.NewManager(r.Client)
+		r.AuthManager = auth.NewManager(r.Client, r.EventRecorder)
 	}
 
 	// Initialize renewal calculator

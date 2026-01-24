@@ -94,6 +94,11 @@ type UserStatus struct {
 	// +optional
 	Phase string `json:"phase,omitempty"`
 
+	// RotationStep provides granular visibility into certificate rotation progress
+	// Values: GeneratingKey, CreatingCSR, WaitingForApproval, PerformingAtomicFlip, Finalizing
+	// +optional
+	RotationStep string `json:"rotationStep,omitempty"`
+
 	// Message provides details about the current status
 	// +optional
 	Message string `json:"message,omitempty"`

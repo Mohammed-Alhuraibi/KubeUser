@@ -24,6 +24,8 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -44,120 +46,180 @@ const (
 
 // RotationManager handles atomic certificate rotation with forward secrecy
 type RotationManager struct {
-	client client.Client
+	client        client.Client
+	eventRecorder record.EventRecorder
 }
 
 // NewRotationManager creates a new rotation manager
-func NewRotationManager(k8sClient client.Client) *RotationManager {
+func NewRotationManager(k8sClient client.Client, eventRecorder record.EventRecorder) *RotationManager {
 	return &RotationManager{
-		client: k8sClient,
+		client:        k8sClient,
+		eventRecorder: eventRecorder,
 	}
 }
 
-// RotateUserCertificate performs stateful certificate rotation using Shadow Secret pattern
-func (rm *RotationManager) RotateUserCertificate(ctx context.Context, user *authv1alpha1.User, certDuration time.Duration) error {
+// RotateUserCertificate performs stateful certificate rotation using Shadow Secret pattern.
+// Returns (changed bool, result *ctrl.Result, error) where:
+// - changed: true if any status fields were modified and need API persistence
+// - result: non-nil if immediate requeue is needed (e.g., Shadow Secret created)
+// - error: actual error that should stop reconciliation
+func (rm *RotationManager) RotateUserCertificate(ctx context.Context, user *authv1alpha1.User, certDuration time.Duration) (bool, *ctrl.Result, error) {
 	logger := logf.FromContext(ctx)
 	username := user.Name
-	userUID := string(user.UID)
 
-	logger.Info("Starting stateful certificate rotation", "user", username, "uid", userUID)
-
-	// Step 1: Check for existing Shadow Secret (stateful rotation)
+	// Step 1: Check for existing Shadow Secret (Source of Truth for rotation state)
 	shadowSecret, shadowExists, err := rm.getShadowSecret(ctx, username)
 	if err != nil {
-		return fmt.Errorf("failed to check shadow secret: %w", err)
+		return false, nil, fmt.Errorf("failed to check shadow secret: %w", err)
 	}
 
-	var keyPEM []byte
-	var csrName string
+	// If Shadow Secret exists, we MUST be in Renewing state regardless of User.Status.Phase
+	if shadowExists {
+		logger.Info("Shadow Secret found, ensuring Renewing state", "shadowSecret", shadowSecret.Name)
 
-	if !shadowExists {
-		// Step 1a: Initial Generation
-		logger.Info("No shadow secret found, generating new key and CSR name")
+		// Force status to reflect the rotation state (Shadow Secret as Source of Truth)
+		statusChanged := false
+		if user.Status.Phase != "Renewing" {
+			logger.Info("Forcing Phase to Renewing based on Shadow Secret existence")
+			user.Status.Phase = "Renewing"
+			user.Status.Message = "Certificate rotation in progress"
+			statusChanged = true
 
-		newPrivateKey, err := rsa.GenerateKey(rand.Reader, 2048)
-		if err != nil {
-			rm.recordUniqueAttempt(user, authv1alpha1.RenewalAttempt{
-				Timestamp: metav1.Now(),
-				Success:   false,
-				Message:   fmt.Sprintf("Failed to generate private key: %v", err),
-			})
-			return fmt.Errorf("failed to generate private key: %w", err)
+			// Emit event for state transition
+			rm.eventRecorder.Event(user, "Normal", "RotationResumed", "Resuming certificate rotation from Shadow Secret")
 		}
 
-		keyPEM = pem.EncodeToMemory(&pem.Block{
-			Type:  "RSA PRIVATE KEY",
-			Bytes: x509.MarshalPKCS1PrivateKey(newPrivateKey),
-		})
-
-		csrName = rm.generateUniqueCSRName(username, userUID)
-
-		err = rm.createShadowSecret(ctx, user, username, keyPEM, csrName)
-		if err != nil {
-			rm.recordUniqueAttempt(user, authv1alpha1.RenewalAttempt{
-				Timestamp: metav1.Now(),
-				Success:   false,
-				Message:   fmt.Sprintf("Failed to create shadow secret: %v", err),
-				CSRName:   csrName,
-			})
-			return fmt.Errorf("failed to create shadow secret: %w", err)
-		}
-
-		// Record Progress: Mark Success: True because the *Action* of creating the state succeeded
-		rm.recordUniqueAttempt(user, authv1alpha1.RenewalAttempt{
-			Timestamp: metav1.Now(),
-			Success:   true,
-			Message:   "Initiated rotation: Shadow secret created",
-			CSRName:   csrName,
-		})
-
-		// Return to allow cache to sync the new Secret before continuing
-		return nil
-	} else {
-		// Step 1b: Retrieve state from Shadow Secret
-		keyPEM = shadowSecret.Data["key.pem"]
-		csrName = string(shadowSecret.Data["csr.name"])
-
-		if len(keyPEM) == 0 || csrName == "" {
-			logger.Error(nil, "Corrupted shadow secret found, deleting", "shadowSecret", shadowSecret.Name)
-			_ = rm.deleteShadowSecret(ctx, username)
-			return fmt.Errorf("corrupted shadow secret deleted, requeueing")
-		}
+		// Continue with rotation process
+		return rm.continueRotationFromShadow(ctx, user, shadowSecret, certDuration, statusChanged)
 	}
 
-	// Step 2: Ensure CSR exists
-	csr, err := rm.ensureCSRExists(ctx, user, csrName, username, keyPEM, certDuration)
+	// Step 2: No Shadow Secret exists, start new rotation
+	logger.Info("Starting new certificate rotation", "user", username)
+
+	// Update status to Renewing with initial rotation step
+	user.Status.Phase = "Renewing"
+	user.Status.RotationStep = "GeneratingKey"
+	user.Status.Message = "Starting certificate renewal"
+
+	// Create Shadow Secret first (this makes rotation atomic)
+	err = rm.createShadowSecretForRotation(ctx, user, certDuration)
 	if err != nil {
-		return err
+		return false, nil, fmt.Errorf("failed to create shadow secret: %w", err)
 	}
 
-	// Step 3: Approve CSR
-	approved, err := rm.ensureCSRApproved(ctx, csr)
-	if err != nil || !approved {
-		return err // Errors or "in progress" requeues are handled here
+	// Update rotation step after successful Shadow Secret creation
+	user.Status.RotationStep = "CreatingCSR"
+
+	// Emit event for rotation start
+	rm.eventRecorder.Event(user, "Normal", "RotationStarted", "Certificate rotation initiated")
+
+	logger.Info("Shadow Secret created, status updated to Renewing", "phase", user.Status.Phase, "rotationStep", user.Status.RotationStep)
+
+	// Return immediate requeue to ensure status is persisted before continuing
+	return true, &ctrl.Result{Requeue: true}, nil
+}
+
+// continueRotationFromShadow continues the rotation process from an existing Shadow Secret
+func (rm *RotationManager) continueRotationFromShadow(ctx context.Context, user *authv1alpha1.User, shadowSecret *corev1.Secret, certDuration time.Duration, statusChanged bool) (bool, *ctrl.Result, error) {
+	logger := logf.FromContext(ctx)
+	username := user.Name
+
+	// Extract rotation metadata from Shadow Secret
+	csrName, exists := shadowSecret.Annotations["auth.openkube.io/csr-name"]
+	if !exists {
+		logger.Error(nil, "Shadow Secret missing CSR name annotation", "shadowSecret", shadowSecret.Name)
+		return false, nil, fmt.Errorf("shadow secret missing CSR name annotation")
 	}
 
-	// Step 4: Wait for signed certificate
-	if len(csr.Status.Certificate) == 0 {
-		logger.Info("Waiting for signed certificate", "csrName", csrName)
-		return fmt.Errorf("waiting for signed certificate")
+	logger.Info("Continuing rotation from Shadow Secret", "csrName", csrName, "currentPhase", user.Status.Phase, "currentRotationStep", user.Status.RotationStep)
+
+	// Ensure Phase is Renewing (Shadow Secret is source of truth)
+	if user.Status.Phase != "Renewing" {
+		logger.Info("Forcing Phase to Renewing during rotation continuation")
+		user.Status.Phase = "Renewing"
+		user.Status.Message = "Certificate rotation in progress"
+		statusChanged = true
 	}
 
-	// Step 5: Atomic Flip
-	signedCert := csr.Status.Certificate
-	if err := rm.atomicSecretUpdate(ctx, user, keyPEM, signedCert); err != nil {
+	// Extract private key from Shadow Secret
+	keyPEM, exists := shadowSecret.Data["key.pem"]
+	if !exists {
+		return statusChanged, nil, fmt.Errorf("shadow secret missing private key")
+	}
+
+	// CRITICAL FIX: Ensure CSR exists before checking approval status
+	// This handles the case where Shadow Secret was created but CSR creation was interrupted
+	logger.Info("Ensuring CSR exists", "csrName", csrName)
+	_, err := rm.ensureCSRExists(ctx, user, csrName, username, keyPEM, certDuration)
+	if err != nil {
+		rm.eventRecorder.Event(user, "Warning", "CSRCreationFailed", fmt.Sprintf("Failed to ensure CSR %s: %v", csrName, err))
+		return statusChanged, nil, fmt.Errorf("failed to ensure CSR exists: %w", err)
+	}
+
+	// Update rotation step based on current state
+	if user.Status.RotationStep != "WaitingForApproval" {
+		user.Status.RotationStep = "WaitingForApproval"
+		statusChanged = true
+	}
+
+	// Step 3: Check CSR status and approve if needed
+	approved, signedCert, err := rm.ensureCSRApprovedAndGetCert(ctx, csrName)
+	if err != nil {
+		rm.eventRecorder.Event(user, "Warning", "CSRApprovalFailed", fmt.Sprintf("Failed to approve CSR %s: %v", csrName, err))
+		return statusChanged, nil, fmt.Errorf("failed to ensure CSR approval: %w", err)
+	}
+
+	if !approved {
+		logger.Info("CSR not yet approved, requeuing", "csrName", csrName, "statusChanged", statusChanged)
+		rm.eventRecorder.Event(user, "Normal", "CSRPending", fmt.Sprintf("Waiting for CSR %s approval", csrName))
+		// Return statusChanged=true to ensure Renewing state is persisted before requeue
+		return statusChanged, &ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+
+	logger.Info("CSR approved, performing atomic flip", "csrName", csrName)
+	rm.eventRecorder.Event(user, "Normal", "CSRApproved", fmt.Sprintf("CSR %s approved, performing atomic secret update", csrName))
+
+	// Update rotation step for atomic flip
+	if user.Status.RotationStep != "PerformingAtomicFlip" {
+		user.Status.RotationStep = "PerformingAtomicFlip"
+		statusChanged = true
+	}
+
+	// Step 4: Perform atomic secret update
+	err = rm.atomicSecretUpdate(ctx, user, keyPEM, signedCert)
+	if err != nil {
+		rm.eventRecorder.Event(user, "Warning", "AtomicFlipFailed", fmt.Sprintf("Atomic secret update failed: %v", err))
 		rm.recordUniqueAttempt(user, authv1alpha1.RenewalAttempt{
 			Timestamp: metav1.Now(),
 			Success:   false,
 			Message:   fmt.Sprintf("Atomic flip failed: %v", err),
 			CSRName:   csrName,
 		})
-		return err
+		return statusChanged, nil, err
 	}
 
-	// Step 6: Finalize & Cleanup
+	logger.Info("Atomic flip completed successfully")
+	rm.eventRecorder.Event(user, "Normal", "RotationCompleted", "Certificate rotation completed successfully")
+
+	// Update rotation step for finalization
+	if user.Status.RotationStep != "Finalizing" {
+		user.Status.RotationStep = "Finalizing"
+		statusChanged = true
+	}
+
+	// Step 5: Finalize & Cleanup
 	_ = rm.cleanupRotationResources(ctx, username, csrName)
-	_ = rm.updateUserStatusAfterRotation(ctx, user, signedCert, certDuration)
+
+	// Update user status after successful rotation
+	statusUpdated, err := rm.updateUserStatusAfterRotation(ctx, user, signedCert, certDuration)
+	if err != nil {
+		logger.Error(err, "Failed to update user status after rotation")
+		return true, nil, err // Status was changed during rotation, but final update failed
+	}
+
+	if statusUpdated {
+		statusChanged = true
+	}
 
 	rm.recordUniqueAttempt(user, authv1alpha1.RenewalAttempt{
 		Timestamp: metav1.Now(),
@@ -166,7 +228,8 @@ func (rm *RotationManager) RotateUserCertificate(ctx context.Context, user *auth
 		CSRName:   csrName,
 	})
 
-	return nil
+	logger.Info("Rotation completed, status changes ready for persistence", "statusChanged", statusChanged)
+	return true, nil, nil // Status was updated successfully
 }
 
 // recordUniqueAttempt prevents duplicate log entries and spam
@@ -245,6 +308,61 @@ func (rm *RotationManager) createShadowSecret(ctx context.Context, user *authv1a
 		Data: map[string][]byte{
 			"key.pem":  keyPEM,
 			"csr.name": []byte(csrName),
+		},
+	}
+
+	return rm.client.Create(ctx, shadowSecret)
+}
+
+// createShadowSecretForRotation creates a shadow secret with generated key and CSR name for rotation
+func (rm *RotationManager) createShadowSecretForRotation(ctx context.Context, user *authv1alpha1.User, certDuration time.Duration) error {
+	username := user.Name
+	userUID := string(user.UID)
+
+	// Generate new private key
+	newPrivateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return fmt.Errorf("failed to generate private key: %w", err)
+	}
+
+	keyPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(newPrivateKey),
+	})
+
+	// Generate unique CSR name
+	csrName := rm.generateUniqueCSRName(username, userUID)
+
+	// Create shadow secret with generated key and CSR name
+	shadowSecretName := fmt.Sprintf("%s-rotation-temp", username)
+	userNamespace := helpers.GetKubeUserNamespace()
+
+	shadowSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      shadowSecretName,
+			Namespace: userNamespace,
+			Labels: map[string]string{
+				"auth.openkube.io/user":     username,
+				"auth.openkube.io/rotation": "true",
+				"auth.openkube.io/shadow":   "true",
+			},
+			Annotations: map[string]string{
+				"auth.openkube.io/csr-name": csrName,
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion:         user.APIVersion,
+					Kind:               user.Kind,
+					Name:               user.Name,
+					UID:                user.UID,
+					Controller:         &[]bool{true}[0],
+					BlockOwnerDeletion: &[]bool{true}[0],
+				},
+			},
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			"key.pem": keyPEM,
 		},
 	}
 
@@ -378,6 +496,49 @@ func (rm *RotationManager) ensureCSRApproved(ctx context.Context, csr *certv1.Ce
 	return false, nil // Just approved, need to wait for certificate
 }
 
+// ensureCSRApprovedAndGetCert checks CSR status, approves if needed, and returns signed certificate
+func (rm *RotationManager) ensureCSRApprovedAndGetCert(ctx context.Context, csrName string) (bool, []byte, error) {
+	logger := logf.FromContext(ctx)
+
+	// Get the CSR
+	csr := &certv1.CertificateSigningRequest{}
+	err := rm.client.Get(ctx, types.NamespacedName{Name: csrName}, csr)
+	if err != nil {
+		return false, nil, fmt.Errorf("failed to get CSR: %w", err)
+	}
+
+	// Check if already approved and has certificate
+	approved := false
+	for _, condition := range csr.Status.Conditions {
+		if condition.Type == certv1.CertificateApproved && condition.Status == corev1.ConditionTrue {
+			approved = true
+			break
+		}
+		if condition.Type == certv1.CertificateDenied && condition.Status == corev1.ConditionTrue {
+			return false, nil, fmt.Errorf("CSR was denied: %s", condition.Message)
+		}
+	}
+
+	// If not approved, approve it
+	if !approved {
+		_, err := rm.ensureCSRApproved(ctx, csr)
+		if err != nil {
+			return false, nil, err
+		}
+		// Just approved, need to wait for certificate
+		return false, nil, nil
+	}
+
+	// Check if certificate is available
+	if len(csr.Status.Certificate) == 0 {
+		logger.Info("CSR approved but certificate not yet available", "csrName", csrName)
+		return false, nil, nil
+	}
+
+	logger.Info("CSR approved and certificate available", "csrName", csrName)
+	return true, csr.Status.Certificate, nil
+}
+
 // cleanupRotationResources removes shadow secret and CSR after successful rotation
 func (rm *RotationManager) cleanupRotationResources(ctx context.Context, username, csrName string) error {
 	logger := logf.FromContext(ctx)
@@ -473,7 +634,7 @@ func (rm *RotationManager) atomicSecretUpdate(ctx context.Context, user *authv1a
 	}
 	// If secret doesn't exist, oldCfgSecret remains nil (no backup needed)
 
-	// Update key secret first
+	// Update key secret first with ResourceVersion checking
 	keySecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      keySecretName,
@@ -485,12 +646,17 @@ func (rm *RotationManager) atomicSecretUpdate(ctx context.Context, user *authv1a
 		},
 	}
 
+	// If we have an existing secret, preserve its ResourceVersion for concurrency safety
+	if oldKeySecret != nil {
+		keySecret.ObjectMeta.ResourceVersion = oldKeySecret.ObjectMeta.ResourceVersion
+	}
+
 	err = helpers.CreateOrUpdate(ctx, rm.client, keySecret)
 	if err != nil {
 		return fmt.Errorf("failed to update key secret: %w", err)
 	}
 
-	// Update kubeconfig secret with rollback on failure
+	// Update kubeconfig secret with rollback on failure and ResourceVersion checking
 	cfgSecret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      cfgSecretName,
@@ -500,6 +666,11 @@ func (rm *RotationManager) atomicSecretUpdate(ctx context.Context, user *authv1a
 		Data: map[string][]byte{
 			"config": newKubeconfig,
 		},
+	}
+
+	// If we have an existing secret, preserve its ResourceVersion for concurrency safety
+	if oldCfgSecret != nil {
+		cfgSecret.ObjectMeta.ResourceVersion = oldCfgSecret.ObjectMeta.ResourceVersion
 	}
 
 	err = helpers.CreateOrUpdate(ctx, rm.client, cfgSecret)
@@ -518,35 +689,58 @@ func (rm *RotationManager) atomicSecretUpdate(ctx context.Context, user *authv1a
 	return nil
 }
 
-// updateUserStatusAfterRotation updates user status with new certificate information
-func (rm *RotationManager) updateUserStatusAfterRotation(ctx context.Context, user *authv1alpha1.User, signedCert []byte, _ time.Duration) error {
+// updateUserStatusAfterRotation updates user status fields in memory with new certificate information.
+// Returns (bool, error) where bool indicates if any status fields were changed.
+// This is a pure in-memory mutator that performs no API writes.
+func (rm *RotationManager) updateUserStatusAfterRotation(ctx context.Context, user *authv1alpha1.User, signedCert []byte, _ time.Duration) (bool, error) {
 	certExpiry, err := rm.extractCertificateExpiry(signedCert)
 	if err != nil {
-		return err
+		return false, err
 	}
 
+	// Track changes for idempotent updates
+	changed := false
+
 	// 1. Set ExpiryTime (Always show this so user knows when cert dies)
-	// We use the RFC3339 string format here as requested
-	user.Status.ExpiryTime = certExpiry.Format(time.RFC3339)
+	newExpiryTime := certExpiry.Format(time.RFC3339)
+	if user.Status.ExpiryTime != newExpiryTime {
+		user.Status.ExpiryTime = newExpiryTime
+		changed = true
+	}
 
 	// 2. Conditional Renewal Logic
-	// If autoRenew is false, we set NextRenewalAt to nil so it disappears from 'describe' and 'get'
+	var newNextRenewalAt *metav1.Time
 	if user.Spec.Auth.AutoRenew {
 		// Calculate when the next rotation would trigger
 		renewalTime := CalculateNextRenewal(time.Now(), certExpiry, user.Spec.Auth.RenewBefore)
-		user.Status.NextRenewalAt = &renewalTime
+		newNextRenewalAt = &renewalTime
 	} else {
 		// Explicitly clear the field if auto-renewal is disabled
-		user.Status.NextRenewalAt = nil
+		newNextRenewalAt = nil
 	}
 
-	user.Status.Phase = "Active"
+	// Compare NextRenewalAt using pointer-safe comparison
+	if !helpers.SemanticTimePtrMatch(user.Status.NextRenewalAt, newNextRenewalAt) {
+		user.Status.NextRenewalAt = newNextRenewalAt
+		changed = true
+	}
 
-	// 3. Update conditions properly (Deduplicating by Type)
+	// 3. Update Phase and clear RotationStep
+	if user.Status.Phase != helpers.PhaseActive {
+		user.Status.Phase = helpers.PhaseActive
+		changed = true
+	}
+
+	if user.Status.RotationStep != "" {
+		user.Status.RotationStep = ""
+		changed = true
+	}
+
+	// 4. Update conditions properly (Deduplicating by Type)
 	now := metav1.Now()
 
 	// Helper to ensure we don't duplicate conditions or grow the list infinitely
-	updateCondition := func(condType string, status metav1.ConditionStatus, reason, message string) {
+	updateCondition := func(condType string, status metav1.ConditionStatus, reason, message string) bool {
 		newCond := metav1.Condition{
 			Type:               condType,
 			Status:             status,
@@ -556,25 +750,31 @@ func (rm *RotationManager) updateUserStatusAfterRotation(ctx context.Context, us
 			ObservedGeneration: user.Generation,
 		}
 
-		exists := false
 		for i, c := range user.Status.Conditions {
 			if c.Type == condType {
-				user.Status.Conditions[i] = newCond
-				exists = true
-				break
+				// Check if condition actually changed
+				if c.Status != status || c.Reason != reason || c.Message != message {
+					user.Status.Conditions[i] = newCond
+					return true
+				}
+				return false // Condition unchanged
 			}
 		}
-		if !exists {
-			user.Status.Conditions = append(user.Status.Conditions, newCond)
-		}
+
+		// Condition not found, add new one
+		user.Status.Conditions = append(user.Status.Conditions, newCond)
+		return true
 	}
 
 	// Update status conditions
-	updateCondition("Ready", metav1.ConditionTrue, "UserProvisioned", "Certificate is valid and active")
-	updateCondition("Renewing", metav1.ConditionFalse, "RenewalComplete", "Latest renewal cycle finished successfully")
+	if updateCondition("Ready", metav1.ConditionTrue, "UserProvisioned", "Certificate is valid and active") {
+		changed = true
+	}
+	if updateCondition("Renewing", metav1.ConditionFalse, "RenewalComplete", "Latest renewal cycle finished successfully") {
+		changed = true
+	}
 
-	// 4. Final step: Push the update to the Kubernetes API
-	return rm.client.Status().Update(ctx, user)
+	return changed, nil
 }
 
 // Helper methods
