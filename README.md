@@ -195,12 +195,16 @@ kubectl get crd users.auth.openkube.io
 
 Create a user with namespace-scoped access:
 
-```yaml path=null start=null
+```yaml
 apiVersion: auth.openkube.io/v1alpha1
 kind: User
 metadata:
   name: alice
 spec:
+  auth:
+    type: x509        # Default, can be omitted
+    ttl: "72h"        # 3 days (default: 2160h = 3 months)
+    autoRenew: false  # Default, can be omitted
   roles:
     - namespace: "development"
       existingRole: "developer"
@@ -210,24 +214,33 @@ spec:
 
 ### User with Cluster-wide Access
 
-```yaml path=null start=null
+```yaml
 apiVersion: auth.openkube.io/v1alpha1
 kind: User
 metadata:
   name: bob-admin
 spec:
+  auth:
+    type: x509
+    ttl: "2160h"      # 3 months (default)
+    autoRenew: true   # Enable automatic renewal
   clusterRoles:
     - existingClusterRole: "cluster-admin"
 ```
 
 ### Mixed Permissions Example
 
-```yaml path=null start=null
+```yaml
 apiVersion: auth.openkube.io/v1alpha1
 kind: User
 metadata:
   name: contractor-jane
 spec:
+  auth:
+    type: x509
+    ttl: "720h"       # 30 days
+    autoRenew: true
+    renewBefore: "72h" # Renew 3 days before expiry
   roles:
     - namespace: "project-x"
       existingRole: "developer"
@@ -243,12 +256,17 @@ spec:
 
 KubeUser supports binding existing cluster roles to specific namespaces, providing fine-grained access control:
 
-```yaml path=null start=null
+```yaml
 apiVersion: auth.openkube.io/v1alpha1
 kind: User
 metadata:
   name: namespace-admin
 spec:
+  auth:
+    type: x509
+    ttl: "168h"       # 1 week
+    autoRenew: true
+    renewBefore: "24h" # Renew 1 day before expiry
   roles:
     - namespace: "production"
       existingClusterRole: "admin"  # Full admin access to production namespace only
@@ -263,16 +281,74 @@ This approach allows you to:
 - Maintain consistent permission sets across different namespaces
 - Avoid creating duplicate namespace-scoped roles
 
+### Auto-Renewal Examples
+
+#### Basic Auto-Renewal (33% Rule)
+```yaml
+apiVersion: auth.openkube.io/v1alpha1
+kind: User
+metadata:
+  name: alice-auto
+spec:
+  auth:
+    type: x509
+    ttl: "24h"        # 24 hour certificate
+    autoRenew: true   # Renews after 16 hours (33% rule)
+  clusterRoles:
+    - existingClusterRole: "view"
+```
+
+#### Custom Renewal Timing
+```yaml
+apiVersion: auth.openkube.io/v1alpha1
+kind: User
+metadata:
+  name: bob-custom
+spec:
+  auth:
+    type: x509
+    ttl: "2h"         # 2 hour certificate
+    autoRenew: true
+    renewBefore: "30m" # Renew 30 minutes before expiry
+  roles:
+    - namespace: "development"
+      existingClusterRole: "edit"
+```
+
+#### Short-lived Certificate
+```yaml
+apiVersion: auth.openkube.io/v1alpha1
+kind: User
+metadata:
+  name: charlie-short
+spec:
+  auth:
+    type: x509
+    ttl: "10m"        # 10 minute certificate (minimum)
+    autoRenew: true
+    renewBefore: "3m" # Auto-corrected if too aggressive
+  roles:
+    - namespace: "testing"
+      existingRole: "tester"
+```
+
 ### Field Reference
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
+| `spec.auth` | `AuthSpec` | No | Authentication configuration (optional, uses defaults) |
+| `spec.auth.type` | `string` | No | Authentication method: `x509` or `oidc` (default: `x509`) |
+| `spec.auth.ttl` | `string` | No | Certificate lifetime (default: `2160h` = 3 months) |
+| `spec.auth.autoRenew` | `boolean` | No | Enable automatic certificate renewal (default: `false`) |
+| `spec.auth.renewBefore` | `string` | No | Renew this duration before expiry (overrides 33% rule) |
 | `spec.roles` | `[]RoleSpec` | No | List of namespace-scoped role bindings |
 | `spec.roles[].namespace` | `string` | Yes | Target namespace for the role binding |
 | `spec.roles[].existingRole` | `string` | No* | Name of the existing Role in the namespace |
 | `spec.roles[].existingClusterRole` | `string` | No* | Name of the existing ClusterRole to bind to the namespace |
 | `spec.clusterRoles` | `[]ClusterRoleSpec` | No | List of cluster-wide role bindings |
 | `spec.clusterRoles[].existingClusterRole` | `string` | Yes | Name of the existing ClusterRole |
+
+*Note: Either `existingRole` or `existingClusterRole` must be specified for each role entry.*
 
 
 ### Managing Users
@@ -290,10 +366,10 @@ kubectl get users
 kubectl describe user jane
 
 # Get the generated kubeconfig
-kubectl get secret jane-kubeconfig -n kubeuser -o jsonpath='{.data.config}' | base64 -d > ~/tmp/kubeconfig
+kubectl get secret jane-kubeconfig -n kubeuser -o jsonpath='{.data.config}' | base64 -d > /tmp/kubeconfig
 
 # Test user access
-kubectl --kubeconfig ~/tmp/kubeconfig get pods -n dev
+kubectl --kubeconfig /tmp/kubeconfig get pods -n dev
 
 # Delete user (cleans up all associated resources)
 kubectl delete user jane
