@@ -196,6 +196,39 @@ func (r *UserReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	}
 	logger.Info("Authentication credential processing completed")
 
+	// Handle NextRenewalAt field based on autoRenew setting
+	// This ensures the field is managed correctly when autoRenew setting changes
+	if !user.Spec.Auth.AutoRenew && user.Status.NextRenewalAt != nil {
+		logger.Info("Auto-renewal disabled, clearing NextRenewalAt field")
+		user.Status.NextRenewalAt = nil
+		if err := r.Status().Update(ctx, &user); err != nil {
+			logger.Error(err, "Failed to clear NextRenewalAt field")
+			// Don't return error, continue with reconciliation
+		} else {
+			logger.Info("Successfully cleared NextRenewalAt field")
+		}
+	} else if user.Spec.Auth.AutoRenew && user.Status.NextRenewalAt == nil && user.Status.ExpiryTime != "" {
+		// Auto-renewal enabled but NextRenewalAt is not set - calculate it from existing certificate
+		logger.Info("Auto-renewal enabled but NextRenewalAt not set, calculating from existing certificate")
+		if certExpiry, err := time.Parse(time.RFC3339, user.Status.ExpiryTime); err == nil {
+			certDuration := auth.GetAuthDuration(&user)
+			issuedAt := certExpiry.Add(-certDuration) // Approximate issued time
+
+			// Import the renewal package function
+			renewalTime := renewal.CalculateNextRenewal(issuedAt, certExpiry, user.Spec.Auth.RenewBefore)
+			user.Status.NextRenewalAt = &renewalTime
+
+			if err := r.Status().Update(ctx, &user); err != nil {
+				logger.Error(err, "Failed to set NextRenewalAt field")
+				// Don't return error, continue with reconciliation
+			} else {
+				logger.Info("Successfully set NextRenewalAt field", "nextRenewalAt", renewalTime.Time.Format(time.RFC3339))
+			}
+		} else {
+			logger.Error(err, "Failed to parse existing certificate expiry time", "expiryTime", user.Status.ExpiryTime)
+		}
+	}
+
 	// Requeue based on auto-renewal configuration
 	logger.Info("Calculating requeue strategy", "phase", user.Status.Phase, "autoRenew", user.Spec.Auth.AutoRenew)
 
