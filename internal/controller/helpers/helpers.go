@@ -27,6 +27,7 @@ const (
 	PhaseExpired = "Expired"
 	PhaseReady   = "Ready"
 	PhaseActive  = "Active"
+	PhasePending = "Pending"
 )
 
 // GetKubeUserNamespace returns the namespace where all KubeUser resources should be created
@@ -90,16 +91,20 @@ func UpdateUserStatus(ctx context.Context, r client.Client, user *authv1alpha1.U
 	}
 
 	// Semantic comparison: only update if values actually changed
-	if user.Status.Phase != newPhase {
+	// Capture old values before assignment for accurate logging
+	oldPhase := user.Status.Phase
+	oldMessage := user.Status.Message
+
+	if oldPhase != newPhase {
 		user.Status.Phase = newPhase
 		changed = true
-		logger.Info("Phase changed", "oldPhase", user.Status.Phase, "newPhase", newPhase)
+		logger.Info("Phase changed", "oldPhase", oldPhase, "newPhase", newPhase)
 	}
 
-	if user.Status.Message != newMessage {
+	if oldMessage != newMessage {
 		user.Status.Message = newMessage
 		changed = true
-		logger.Info("Message changed", "newMessage", newMessage)
+		logger.Info("Message changed", "oldMessage", oldMessage, "newMessage", newMessage)
 	}
 
 	// Calculate condition updates
@@ -171,13 +176,13 @@ func updateStatusCondition(user *authv1alpha1.User, phase, message string) bool 
 	conditionMessage := message
 
 	switch phase {
-	case "Error":
+	case PhaseError:
 		conditionStatus = metav1.ConditionFalse
 		conditionReason = "ProvisioningFailed"
-	case "Expired":
+	case PhaseExpired:
 		conditionStatus = metav1.ConditionFalse
 		conditionReason = "CertificateExpired"
-	case "Pending":
+	case PhasePending:
 		conditionStatus = metav1.ConditionFalse
 		conditionReason = "Provisioning"
 	}

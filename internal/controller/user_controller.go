@@ -181,7 +181,7 @@ func (r *UserReconciler) reconcileBusinessLogic(ctx context.Context, user *authv
 // Returns true if the status was changed.
 func (r *UserReconciler) ensureInitialStatus(user *authv1alpha1.User) bool {
 	if user.Status.Phase == "" {
-		user.Status.Phase = "Pending"
+		user.Status.Phase = helpers.PhasePending
 		user.Status.Message = "Initializing user resources"
 		return true
 	}
@@ -274,7 +274,12 @@ func (r *UserReconciler) reconcileAuthentication(ctx context.Context, user *auth
 
 	err := r.AuthManager.Ensure(ctx, user)
 	if err != nil {
-		logger.Error(err, "Failed to ensure authentication credentials")
+		// Don't log expected requeue errors as ERROR level
+		if strings.Contains(err.Error(), "requeue needed") {
+			logger.Info("Authentication processing needs requeue", "reason", err.Error())
+		} else {
+			logger.Error(err, "Failed to ensure authentication credentials")
+		}
 		return err
 	}
 
