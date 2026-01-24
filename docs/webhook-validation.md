@@ -11,6 +11,8 @@ The KubeUser operator includes an admission webhook that validates User resource
 - **ClusterRole existence validation**: Verifies that all referenced ClusterRoles exist
 - **Mutual exclusion validation**: Ensures only one of `existingRole` or `existingClusterRole` is specified per role entry
 - **Required field validation**: Ensures at least one role reference is provided when roles are specified
+- **Auth specification validation**: Validates TTL, renewBefore, and other auth configuration
+- **Renewal configuration validation**: Validates auto-renewal settings when enabled
 - **Clear error messages**: Provides descriptive error messages when validation fails
 
 ## How it Works
@@ -20,6 +22,8 @@ The KubeUser operator includes an admission webhook that validates User resource
    - All referenced Roles exist in their specified namespaces
    - All referenced ClusterRoles exist
    - Each role entry has exactly one of `existingRole` or `existingClusterRole` specified
+   - Auth specification is valid (TTL within limits, valid duration format)
+   - Renewal configuration is valid when auto-renewal is enabled
 3. If validation passes, the User resource is allowed to be persisted
 4. If validation fails, the operation is rejected with a clear error message
 
@@ -102,6 +106,16 @@ error validating User resource: cannot specify both existingRole and existingClu
 error validating User resource: either existingRole or existingClusterRole must be specified for namespace 'default'
 ```
 
+**Invalid TTL:**
+```
+error validating User resource: invalid auth specification: TTL must not exceed 8760h0m0s, got: 17520h0m0s
+```
+
+**Invalid renewal configuration:**
+```
+error validating User resource: invalid renewal configuration: renewBefore too aggressive, capped at 90% (54m0s)
+```
+
 ## Deployment
 
 The webhook is automatically deployed when you apply the default configuration:
@@ -172,6 +186,22 @@ spec:
     - namespace: default
       existingRole: some-role
       existingClusterRole: some-cluster-role  # This should fail
+EOF
+```
+
+Test invalid TTL validation:
+```bash
+cat <<EOF | kubectl apply -f -
+apiVersion: auth.openkube.io/v1alpha1
+kind: User
+metadata:
+  name: test-invalid-ttl
+spec:
+  auth:
+    type: x509
+    ttl: "17520h"  # 2 years - should fail (max is 1 year)
+  clusterRoles:
+    - existingClusterRole: view
 EOF
 ```
 

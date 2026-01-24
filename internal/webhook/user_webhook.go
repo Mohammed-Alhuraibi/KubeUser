@@ -12,6 +12,8 @@ import (
 	"net/http"
 
 	authv1alpha1 "github.com/openkube-hub/KubeUser/api/v1alpha1"
+	"github.com/openkube-hub/KubeUser/internal/controller/auth"
+	"github.com/openkube-hub/KubeUser/internal/controller/renewal"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -50,6 +52,12 @@ func (w *UserWebhook) Handle(ctx context.Context, req admission.Request) admissi
 	// Validate ClusterRole references
 	if err := w.validateClusterRoles(ctx, user.Spec.ClusterRoles); err != nil {
 		logger.Error(err, "ClusterRole validation failed", "user", user.Name)
+		return admission.Denied(err.Error())
+	}
+
+	// Validate Auth specification
+	if err := w.validateAuthSpec(user); err != nil {
+		logger.Error(err, "Auth specification validation failed", "user", user.Name)
 		return admission.Denied(err.Error())
 	}
 
@@ -160,6 +168,11 @@ func (w *UserWebhook) ValidateCreate(ctx context.Context, obj runtime.Object) (a
 		return nil, err
 	}
 
+	// Validate Auth specification
+	if err := w.validateAuthSpec(user); err != nil {
+		return nil, err
+	}
+
 	return nil, nil
 }
 
@@ -189,6 +202,11 @@ func (w *UserWebhook) ValidateUpdate(ctx context.Context, oldObj, newObj runtime
 		return nil, err
 	}
 
+	// Validate Auth specification in the updated spec
+	if err := w.validateAuthSpec(newUser); err != nil {
+		return nil, err
+	}
+
 	return nil, nil
 }
 
@@ -196,4 +214,21 @@ func (w *UserWebhook) ValidateUpdate(ctx context.Context, oldObj, newObj runtime
 func (w *UserWebhook) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
 	// No validation needed for delete operations
 	return nil, nil
+}
+
+// validateAuthSpec validates the auth specification using the auth package validation
+func (w *UserWebhook) validateAuthSpec(user *authv1alpha1.User) error {
+	// Use the existing auth package validation
+	if err := auth.ValidateAuthSpec(user); err != nil {
+		return fmt.Errorf("invalid auth specification: %w", err)
+	}
+
+	// Also validate renewal configuration if auto-renewal is enabled
+	if user.Spec.Auth.AutoRenew {
+		if err := renewal.ValidateRenewalConfig(user); err != nil {
+			return fmt.Errorf("invalid renewal configuration: %w", err)
+		}
+	}
+
+	return nil
 }

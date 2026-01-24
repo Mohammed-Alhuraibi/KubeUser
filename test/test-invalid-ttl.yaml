@@ -1,0 +1,12 @@
+# Test case for webhook validation - should be rejected
+apiVersion: auth.openkube.io/v1alpha1
+kind: User
+metadata:
+  name: invalid-ttl-user
+spec:
+  auth:
+    type: x509
+    ttl: "17520h"  # 2 years - should be rejected by webhook (max is 8760h = 1 year)
+    autoRenew: true
+  clusterRoles:
+    - existingClusterRole: edit
