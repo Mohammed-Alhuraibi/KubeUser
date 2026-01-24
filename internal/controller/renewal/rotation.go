@@ -175,7 +175,7 @@ func (rm *RotationManager) recordUniqueAttempt(user *authv1alpha1.User, attempt 
 
 	if len(history) > 0 {
 		last := history[len(history)-1]
-		// Skip if message and success status are unchanged
+		// Skip if message and success status are identical to the last entry
 		if last.Message == attempt.Message && last.Success == attempt.Success {
 			return
 		}
@@ -522,45 +522,60 @@ func (rm *RotationManager) atomicSecretUpdate(ctx context.Context, user *authv1a
 
 // updateUserStatusAfterRotation updates user status with new certificate information
 func (rm *RotationManager) updateUserStatusAfterRotation(ctx context.Context, user *authv1alpha1.User, signedCert []byte, certDuration time.Duration) error {
-	// Extract certificate expiry
 	certExpiry, err := rm.extractCertificateExpiry(signedCert)
 	if err != nil {
-		return fmt.Errorf("failed to extract certificate expiry: %w", err)
+		return err
 	}
 
-	// Calculate renewal time
-	calculator := NewRenewalCalculator()
-	err = calculator.UpdateUserRenewalStatus(user, certExpiry, certDuration)
-	if err != nil {
-		return fmt.Errorf("failed to update renewal status: %w", err)
+	// 1. Set ExpiryTime (Always show this so user knows when cert dies)
+	// We use the RFC3339 string format here as requested
+	user.Status.ExpiryTime = certExpiry.Format(time.RFC3339)
+
+	// 2. Conditional Renewal Logic
+	// If autoRenew is false, we set NextRenewalAt to nil so it disappears from 'describe' and 'get'
+	if user.Spec.Auth.AutoRenew {
+		// Calculate when the next rotation would trigger
+		renewalTime := CalculateNextRenewal(time.Now(), certExpiry, user.Spec.Auth.RenewBefore)
+		user.Status.NextRenewalAt = &renewalTime
+	} else {
+		// Explicitly clear the field if auto-renewal is disabled
+		user.Status.NextRenewalAt = nil
 	}
 
-	// Update phase
 	user.Status.Phase = "Active"
-	user.Status.Message = "Certificate renewed successfully"
 
-	// Update conditions
+	// 3. Update conditions properly (Deduplicating by Type)
 	now := metav1.Now()
-	readyCondition := metav1.Condition{
-		Type:               "Ready",
-		Status:             metav1.ConditionTrue,
-		LastTransitionTime: now,
-		Reason:             "CertificateRenewed",
-		Message:            "Certificate has been successfully renewed",
+
+	// Helper to ensure we don't duplicate conditions or grow the list infinitely
+	updateCondition := func(condType string, status metav1.ConditionStatus, reason, message string) {
+		newCond := metav1.Condition{
+			Type:               condType,
+			Status:             status,
+			Reason:             reason,
+			Message:            message,
+			LastTransitionTime: now,
+			ObservedGeneration: user.Generation,
+		}
+
+		exists := false
+		for i, c := range user.Status.Conditions {
+			if c.Type == condType {
+				user.Status.Conditions[i] = newCond
+				exists = true
+				break
+			}
+		}
+		if !exists {
+			user.Status.Conditions = append(user.Status.Conditions, newCond)
+		}
 	}
 
-	renewingCondition := metav1.Condition{
-		Type:               "Renewing",
-		Status:             metav1.ConditionFalse,
-		LastTransitionTime: now,
-		Reason:             "RenewalComplete",
-		Message:            "Certificate renewal completed",
-	}
+	// Update status conditions
+	updateCondition("Ready", metav1.ConditionTrue, "UserProvisioned", "Certificate is valid and active")
+	updateCondition("Renewing", metav1.ConditionFalse, "RenewalComplete", "Latest renewal cycle finished successfully")
 
-	// Update or add conditions
-	user.Status.Conditions = rm.updateConditions(user.Status.Conditions, readyCondition)
-	user.Status.Conditions = rm.updateConditions(user.Status.Conditions, renewingCondition)
-
+	// 4. Final step: Push the update to the Kubernetes API
 	return rm.client.Status().Update(ctx, user)
 }
 

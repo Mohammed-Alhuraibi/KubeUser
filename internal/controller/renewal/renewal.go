@@ -150,7 +150,6 @@ func (rc *RenewalCalculator) UpdateUserRenewalStatus(user *authv1alpha1.User, ce
 	// Update status fields with consolidated NextRenewalAt
 	user.Status.ExpiryTime = certExpiry.Format(time.RFC3339)
 	user.Status.NextRenewalAt = &metav1.Time{Time: renewalTime}
-	user.Status.CertificateExpiry = "Certificate"
 
 	return nil
 }
@@ -158,78 +157,79 @@ func (rc *RenewalCalculator) UpdateUserRenewalStatus(user *authv1alpha1.User, ce
 // ValidateRenewalConfig validates the renewal configuration in the user spec
 func ValidateRenewalConfig(user *authv1alpha1.User) error {
 	if !user.Spec.Auth.AutoRenew {
-		return nil // No validation needed if auto-renewal is disabled
+		return nil
 	}
 
-	// Parse certificate duration
 	var certDuration time.Duration
 	if user.Spec.Auth.TTL != "" {
-		var err error
-		certDuration, err = time.ParseDuration(user.Spec.Auth.TTL)
+		d, err := time.ParseDuration(user.Spec.Auth.TTL)
 		if err != nil {
 			return fmt.Errorf("invalid TTL format: %v", err)
 		}
+		certDuration = d
 	} else {
-		certDuration = 90 * 24 * time.Hour // Default 3 months
+		certDuration = 90 * 24 * time.Hour // Default 90 days
 	}
 
-	// Validate renewBefore if specified
 	if user.Spec.Auth.RenewBefore != nil {
 		renewBefore := user.Spec.Auth.RenewBefore.Duration
 
 		if renewBefore <= 0 {
-			return fmt.Errorf("renewBefore must be positive, got: %v", renewBefore)
+			return fmt.Errorf("renewBefore must be positive")
 		}
 
-		if renewBefore >= certDuration {
-			// Auto-fix: set renewBefore to 50% of TTL if it's >= TTL
-			fixedRenewBefore := time.Duration(float64(certDuration) * 0.5)
-			user.Spec.Auth.RenewBefore = &metav1.Duration{Duration: fixedRenewBefore}
-			return fmt.Errorf("renewBefore (%v) was >= TTL (%v), auto-corrected to 50%% of TTL (%v)", renewBefore, certDuration, fixedRenewBefore)
+		// Calculate a proportional safety buffer (10% of TTL), capped at 2 minutes.
+		// For a 10m cert, this is 1 minute.
+		dynamicBuffer := time.Duration(float64(certDuration) * 0.1)
+		if dynamicBuffer > 2*time.Minute {
+			dynamicBuffer = 2 * time.Minute
 		}
 
-		// Ensure renewBefore is at least 2 minutes shorter than TTL for safety
-		minSafetyBuffer := 2 * time.Minute
-		if certDuration-renewBefore < minSafetyBuffer {
-			// Auto-fix: ensure at least 2 minutes safety buffer
-			fixedRenewBefore := certDuration - minSafetyBuffer
-			if fixedRenewBefore <= 0 {
-				// For very short certificates, use 50% rule
-				fixedRenewBefore = time.Duration(float64(certDuration) * 0.5)
+		// 1. Cap early renewal at 90% of TTL to prevent "immediate renewal loops"
+		maxAllowed := time.Duration(float64(certDuration) * 0.9)
+		if renewBefore > maxAllowed {
+			user.Spec.Auth.RenewBefore = &metav1.Duration{Duration: maxAllowed}
+			return fmt.Errorf("renewBefore too aggressive, capped at 90%% (%v)", maxAllowed)
+		}
+
+		// 2. Enforce the safety floor (dynamicBuffer)
+		if certDuration-renewBefore < dynamicBuffer {
+			fixed := certDuration - dynamicBuffer
+			if fixed <= 0 {
+				fixed = time.Duration(float64(certDuration) * 0.5) // Fallback to 50%
 			}
-			user.Spec.Auth.RenewBefore = &metav1.Duration{Duration: fixedRenewBefore}
-			return fmt.Errorf("renewBefore (%v) too close to TTL (%v), auto-corrected to %v for safety", renewBefore, certDuration, fixedRenewBefore)
+			user.Spec.Auth.RenewBefore = &metav1.Duration{Duration: fixed}
+			return fmt.Errorf("renewBefore too close to expiry, auto-corrected to %v for safety", fixed)
 		}
 	}
-
 	return nil
 }
 
 // CalculateNextRenewal calculates the next renewal time based on certificate info
 func CalculateNextRenewal(issuedAt, expiry time.Time, renewBefore *metav1.Duration) metav1.Time {
+	certDuration := expiry.Sub(issuedAt)
 	var renewalTime time.Time
 
-	certDuration := expiry.Sub(issuedAt)
-
 	if renewBefore != nil {
-		// Use custom renewBefore setting
 		renewalTime = expiry.Add(-renewBefore.Duration)
 	} else {
-		// Use 1/3 rule (cert-manager standard)
 		renewalBuffer := time.Duration(float64(certDuration) * DefaultRenewalPercentage)
 		renewalTime = expiry.Add(-renewalBuffer)
 	}
 
-	// Safety floor: ensure at least 2 minutes before expiry
-	safetyFloorTime := expiry.Add(-MinimumRenewalBuffer)
+	// Apply the same proportional safety floor used in validation
+	dynamicBuffer := time.Duration(float64(certDuration) * 0.1)
+	if dynamicBuffer > 1*time.Minute {
+		dynamicBuffer = 1 * time.Minute
+	}
+
+	safetyFloorTime := expiry.Add(-dynamicBuffer)
 	if renewalTime.After(safetyFloorTime) {
 		renewalTime = safetyFloorTime
 	}
 
-	// Ensure renewal time is not in the past
-	now := time.Now()
-	if renewalTime.Before(now) {
-		renewalTime = now
+	if renewalTime.Before(time.Now()) {
+		renewalTime = time.Now()
 	}
 
 	return metav1.Time{Time: renewalTime}

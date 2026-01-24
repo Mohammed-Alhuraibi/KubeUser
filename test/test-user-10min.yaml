@@ -7,6 +7,6 @@ spec:
     type: x509
     ttl: 10m  # 1 hour certificate
     renewBefore: "7m"
-    autoRenew: true
+    autoRenew: false
   clusterRoles:
     - existingClusterRole: edit

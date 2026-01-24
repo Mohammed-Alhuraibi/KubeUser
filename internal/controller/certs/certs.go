@@ -196,7 +196,6 @@ func EnsureCertKubeconfigWithDuration(ctx context.Context, r client.Client, user
 
 	// Update user status with actual certificate expiry and renewal time
 	user.Status.ExpiryTime = certExpiryTime.Format(time.RFC3339)
-	user.Status.CertificateExpiry = "Certificate"
 
 	// Calculate renewal time using proper renewal logic that respects RenewBefore
 	issuedAt := time.Now() // Certificate was just issued

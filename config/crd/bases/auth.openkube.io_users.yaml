@@ -139,11 +139,6 @@ spec:
           status:
             description: UserStatus defines the observed state of User
             properties:
-              certificateExpiry:
-                description: |-
-                  CertificateExpiry indicates if the expiry time comes from actual certificate
-                  Values: "Certificate", "Calculated", "Unknown"
-                type: string
               conditions:
                 description: Conditions follow Kubernetes conventions for detailed
                   status

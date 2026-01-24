@@ -90,11 +90,6 @@ type UserStatus struct {
 	// +optional
 	NextRenewalAt *metav1.Time `json:"nextRenewalAt,omitempty"`
 
-	// CertificateExpiry indicates if the expiry time comes from actual certificate
-	// Values: "Certificate", "Calculated", "Unknown"
-	// +optional
-	CertificateExpiry string `json:"certificateExpiry,omitempty"`
-
 	// Phase is a simple high-level status (Pending, Active, Expired, Error, Renewing)
 	// +optional
 	Phase string `json:"phase,omitempty"`
