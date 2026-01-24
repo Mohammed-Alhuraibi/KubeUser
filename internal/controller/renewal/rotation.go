@@ -48,9 +48,9 @@ type RotationManager struct {
 }
 
 // NewRotationManager creates a new rotation manager
-func NewRotationManager(client client.Client) *RotationManager {
+func NewRotationManager(k8sClient client.Client) *RotationManager {
 	return &RotationManager{
-		client: client,
+		client: k8sClient,
 	}
 }
 
@@ -471,9 +471,7 @@ func (rm *RotationManager) atomicSecretUpdate(ctx context.Context, user *authv1a
 	if err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("failed to backup kubeconfig secret: %w", err)
 	}
-	if apierrors.IsNotFound(err) {
-		oldCfgSecret = nil // No existing secret to backup
-	}
+	// If secret doesn't exist, oldCfgSecret remains nil (no backup needed)
 
 	// Update key secret first
 	keySecret := &corev1.Secret{
@@ -521,7 +519,7 @@ func (rm *RotationManager) atomicSecretUpdate(ctx context.Context, user *authv1a
 }
 
 // updateUserStatusAfterRotation updates user status with new certificate information
-func (rm *RotationManager) updateUserStatusAfterRotation(ctx context.Context, user *authv1alpha1.User, signedCert []byte, certDuration time.Duration) error {
+func (rm *RotationManager) updateUserStatusAfterRotation(ctx context.Context, user *authv1alpha1.User, signedCert []byte, _ time.Duration) error {
 	certExpiry, err := rm.extractCertificateExpiry(signedCert)
 	if err != nil {
 		return err
@@ -630,36 +628,6 @@ func (rm *RotationManager) buildKubeconfig(apiServer, caDataB64 string, signedCe
 func (rm *RotationManager) extractCertificateExpiry(certData []byte) (time.Time, error) {
 	// Use the existing implementation from certs package
 	return certs.ExtractCertificateExpiryWithFormatDetection(certData)
-}
-
-func (rm *RotationManager) updateConditions(conditions []metav1.Condition, newCondition metav1.Condition) []metav1.Condition {
-	for i, condition := range conditions {
-		if condition.Type == newCondition.Type {
-			conditions[i] = newCondition
-			return conditions
-		}
-	}
-	return append(conditions, newCondition)
-}
-
-func (rm *RotationManager) recordRenewalAttempt(user *authv1alpha1.User, attempt authv1alpha1.RenewalAttempt) {
-	history := user.Status.RenewalHistory
-
-	// Idempotency Guard: Check the last entry
-	if len(history) > 0 {
-		last := history[len(history)-1]
-		// If the message and success status are the same, don't add a duplicate
-		if last.Message == attempt.Message && last.Success == attempt.Success {
-			return
-		}
-	}
-
-	// Trim history to last 10 entries
-	if len(history) >= 10 {
-		history = history[1:]
-	}
-
-	user.Status.RenewalHistory = append(history, attempt)
 }
 
 // validateCSRForApproval validates a CSR before auto-approval for security

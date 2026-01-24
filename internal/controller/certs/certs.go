@@ -207,7 +207,7 @@ func EnsureCertKubeconfigWithDuration(ctx context.Context, r client.Client, user
 
 		logger.Info("Certificate times calculated",
 			"expiry", certExpiryTime.Format(time.RFC3339),
-			"nextRenewalAt", nextRenewal.Time.Format(time.RFC3339),
+			"nextRenewalAt", nextRenewal.Format(time.RFC3339),
 			"renewBefore", user.Spec.Auth.RenewBefore)
 	} else {
 		// Explicitly clear the field if auto-renewal is disabled

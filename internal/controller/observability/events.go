@@ -28,9 +28,9 @@ type EventRecorder struct {
 }
 
 // NewEventRecorder creates a new event recorder
-func NewEventRecorder(client client.Client, recorder record.EventRecorder, scheme *runtime.Scheme) *EventRecorder {
+func NewEventRecorder(k8sClient client.Client, recorder record.EventRecorder, scheme *runtime.Scheme) *EventRecorder {
 	return &EventRecorder{
-		client:   client,
+		client:   k8sClient,
 		recorder: recorder,
 		scheme:   scheme,
 	}
