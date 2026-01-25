@@ -276,38 +276,6 @@ func (p *X509Provider) checkIfRenewalNeeded(ctx context.Context, user *authv1alp
 	return false, nil
 }
 
-// isRequeueError checks if an error indicates that requeuing is needed
-func isRequeueError(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	errMsg := err.Error()
-	return contains(errMsg, "requeue needed") ||
-		contains(errMsg, "CSR created") ||
-		contains(errMsg, "approval in progress") ||
-		contains(errMsg, "waiting for")
-}
-
-// contains checks if a string contains a substring (case-insensitive helper)
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) &&
-		(s == substr ||
-			(len(s) > len(substr) &&
-				(s[:len(substr)] == substr ||
-					s[len(s)-len(substr):] == substr ||
-					containsSubstring(s, substr))))
-}
-
-func containsSubstring(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}
-
 // Revoke removes x509 certificates and kubeconfig for the user
 func (p *X509Provider) Revoke(ctx context.Context, user *authv1alpha1.User) error {
 	logger := logf.FromContext(ctx)

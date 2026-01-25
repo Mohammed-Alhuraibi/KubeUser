@@ -126,7 +126,7 @@ func (r *UserReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 
 	// 6. Return pending result if one was captured (e.g., immediate requeue for Shadow Secret creation)
 	if pendingResult != nil {
-		logger.Info("=== END RECONCILE (PENDING REQUEUE) ===", "requeueAfter", pendingResult.RequeueAfter, "requeue", pendingResult.Requeue)
+		logger.Info("=== END RECONCILE (PENDING REQUEUE) ===", "requeueAfter", pendingResult.RequeueAfter)
 		return *pendingResult, nil
 	}
 

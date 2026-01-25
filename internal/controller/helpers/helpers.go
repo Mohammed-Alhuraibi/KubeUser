@@ -23,11 +23,12 @@ import (
 
 const (
 	// Phase constants to avoid goconst issues
-	PhaseError   = "Error"
-	PhaseExpired = "Expired"
-	PhaseReady   = "Ready"
-	PhaseActive  = "Active"
-	PhasePending = "Pending"
+	PhaseError    = "Error"
+	PhaseExpired  = "Expired"
+	PhaseReady    = "Ready"
+	PhaseActive   = "Active"
+	PhasePending  = "Pending"
+	PhaseRenewing = "Renewing"
 )
 
 // GetKubeUserNamespace returns the namespace where all KubeUser resources should be created
@@ -62,7 +63,7 @@ func UpdateUserStatus(ctx context.Context, r client.Client, user *authv1alpha1.U
 	// CRITICAL: Protect the Renewing state from being overwritten
 	// When a user is in the Renewing phase, the rotation state machine owns the status
 	// and RBAC reconciliation must not interfere with it
-	if user.Status.Phase == "Renewing" {
+	if user.Status.Phase == PhaseRenewing {
 		logger.Info("User is in Renewing phase, skipping status update to preserve rotation state")
 		return false, nil
 	}

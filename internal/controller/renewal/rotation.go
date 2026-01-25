@@ -79,9 +79,9 @@ func (rm *RotationManager) RotateUserCertificate(ctx context.Context, user *auth
 
 		// Force status to reflect the rotation state (Shadow Secret as Source of Truth)
 		statusChanged := false
-		if user.Status.Phase != "Renewing" {
+		if user.Status.Phase != helpers.PhaseRenewing {
 			logger.Info("Forcing Phase to Renewing based on Shadow Secret existence")
-			user.Status.Phase = "Renewing"
+			user.Status.Phase = helpers.PhaseRenewing
 			user.Status.Message = "Certificate rotation in progress"
 			statusChanged = true
 
@@ -97,12 +97,12 @@ func (rm *RotationManager) RotateUserCertificate(ctx context.Context, user *auth
 	logger.Info("Starting new certificate rotation", "user", username)
 
 	// Update status to Renewing with initial rotation step
-	user.Status.Phase = "Renewing"
+	user.Status.Phase = helpers.PhaseRenewing
 	user.Status.RotationStep = "GeneratingKey"
 	user.Status.Message = "Starting certificate renewal"
 
 	// Create Shadow Secret first (this makes rotation atomic)
-	err = rm.createShadowSecretForRotation(ctx, user, certDuration)
+	err = rm.createShadowSecretForRotation(ctx, user)
 	if err != nil {
 		return false, nil, fmt.Errorf("failed to create shadow secret: %w", err)
 	}
@@ -134,9 +134,9 @@ func (rm *RotationManager) continueRotationFromShadow(ctx context.Context, user 
 	logger.Info("Continuing rotation from Shadow Secret", "csrName", csrName, "currentPhase", user.Status.Phase, "currentRotationStep", user.Status.RotationStep)
 
 	// Ensure Phase is Renewing (Shadow Secret is source of truth)
-	if user.Status.Phase != "Renewing" {
+	if user.Status.Phase != helpers.PhaseRenewing {
 		logger.Info("Forcing Phase to Renewing during rotation continuation")
-		user.Status.Phase = "Renewing"
+		user.Status.Phase = helpers.PhaseRenewing
 		user.Status.Message = "Certificate rotation in progress"
 		statusChanged = true
 	}
@@ -211,7 +211,7 @@ func (rm *RotationManager) continueRotationFromShadow(ctx context.Context, user 
 	_ = rm.cleanupRotationResources(ctx, username, csrName)
 
 	// Update user status after successful rotation
-	statusUpdated, err := rm.updateUserStatusAfterRotation(ctx, user, signedCert, certDuration)
+	statusUpdated, err := rm.updateUserStatusAfterRotation(user, signedCert, certDuration)
 	if err != nil {
 		logger.Error(err, "Failed to update user status after rotation")
 		return true, nil, err // Status was changed during rotation, but final update failed
@@ -279,43 +279,8 @@ func (rm *RotationManager) getShadowSecret(ctx context.Context, username string)
 	return shadowSecret, true, nil
 }
 
-// createShadowSecret creates a shadow secret with owner reference
-func (rm *RotationManager) createShadowSecret(ctx context.Context, user *authv1alpha1.User, username string, keyPEM []byte, csrName string) error {
-	shadowSecretName := fmt.Sprintf("%s-rotation-temp", username)
-	userNamespace := helpers.GetKubeUserNamespace()
-
-	shadowSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      shadowSecretName,
-			Namespace: userNamespace,
-			Labels: map[string]string{
-				"auth.openkube.io/user":     username,
-				"auth.openkube.io/rotation": "true",
-				"auth.openkube.io/shadow":   "true",
-			},
-			OwnerReferences: []metav1.OwnerReference{
-				{
-					APIVersion:         user.APIVersion,
-					Kind:               user.Kind,
-					Name:               user.Name,
-					UID:                user.UID,
-					Controller:         &[]bool{true}[0],
-					BlockOwnerDeletion: &[]bool{true}[0],
-				},
-			},
-		},
-		Type: corev1.SecretTypeOpaque,
-		Data: map[string][]byte{
-			"key.pem":  keyPEM,
-			"csr.name": []byte(csrName),
-		},
-	}
-
-	return rm.client.Create(ctx, shadowSecret)
-}
-
 // createShadowSecretForRotation creates a shadow secret with generated key and CSR name for rotation
-func (rm *RotationManager) createShadowSecretForRotation(ctx context.Context, user *authv1alpha1.User, certDuration time.Duration) error {
+func (rm *RotationManager) createShadowSecretForRotation(ctx context.Context, user *authv1alpha1.User) error {
 	username := user.Name
 	userUID := string(user.UID)
 
@@ -632,7 +597,9 @@ func (rm *RotationManager) atomicSecretUpdate(ctx context.Context, user *authv1a
 	if err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("failed to backup kubeconfig secret: %w", err)
 	}
-	// If secret doesn't exist, oldCfgSecret remains nil (no backup needed)
+	if apierrors.IsNotFound(err) {
+		oldCfgSecret = nil // No existing secret to backup
+	}
 
 	// Update key secret first with ResourceVersion checking
 	keySecret := &corev1.Secret{
@@ -648,7 +615,7 @@ func (rm *RotationManager) atomicSecretUpdate(ctx context.Context, user *authv1a
 
 	// If we have an existing secret, preserve its ResourceVersion for concurrency safety
 	if oldKeySecret != nil {
-		keySecret.ObjectMeta.ResourceVersion = oldKeySecret.ObjectMeta.ResourceVersion
+		keySecret.ResourceVersion = oldKeySecret.ResourceVersion
 	}
 
 	err = helpers.CreateOrUpdate(ctx, rm.client, keySecret)
@@ -670,7 +637,7 @@ func (rm *RotationManager) atomicSecretUpdate(ctx context.Context, user *authv1a
 
 	// If we have an existing secret, preserve its ResourceVersion for concurrency safety
 	if oldCfgSecret != nil {
-		cfgSecret.ObjectMeta.ResourceVersion = oldCfgSecret.ObjectMeta.ResourceVersion
+		cfgSecret.ResourceVersion = oldCfgSecret.ResourceVersion
 	}
 
 	err = helpers.CreateOrUpdate(ctx, rm.client, cfgSecret)
@@ -692,7 +659,7 @@ func (rm *RotationManager) atomicSecretUpdate(ctx context.Context, user *authv1a
 // updateUserStatusAfterRotation updates user status fields in memory with new certificate information.
 // Returns (bool, error) where bool indicates if any status fields were changed.
 // This is a pure in-memory mutator that performs no API writes.
-func (rm *RotationManager) updateUserStatusAfterRotation(ctx context.Context, user *authv1alpha1.User, signedCert []byte, _ time.Duration) (bool, error) {
+func (rm *RotationManager) updateUserStatusAfterRotation(user *authv1alpha1.User, signedCert []byte, _ time.Duration) (bool, error) {
 	certExpiry, err := rm.extractCertificateExpiry(signedCert)
 	if err != nil {
 		return false, err
