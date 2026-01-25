@@ -43,10 +43,12 @@ func EnsureCertKubeconfig(ctx context.Context, r client.Client, user *authv1alph
 }
 
 // EnsureCertKubeconfigWithDuration ensures certificate kubeconfig with custom duration.
-// Returns (statusChanged bool, requeue bool, error) where:
-// - statusChanged: true if user status fields were modified in memory
-// - requeue: true if the operation needs to be requeued
-// - error: any error that occurred
+// Returns (statusChanged bool, requeueNeeded bool, error) where:
+// - statusChanged: true if user.Status.ExpiryTime or user.Status.NextRenewalAt were modified in memory
+// - requeueNeeded: true if the controller needs to requeue (CSR pending, approval needed, etc.)
+// - error: any execution error
+// This function does NOT perform any r.Status().Update() calls - it only modifies the user object in memory.
+// The caller (orchestrator) is responsible for persisting status changes to etcd.
 func EnsureCertKubeconfigWithDuration(ctx context.Context, r client.Client, user *authv1alpha1.User, duration time.Duration) (bool, bool, error) {
 	username := user.Name
 	userNamespace := helpers.GetKubeUserNamespace()
@@ -199,14 +201,20 @@ func EnsureCertKubeconfigWithDuration(ctx context.Context, r client.Client, user
 	logger.Info("Successfully extracted certificate expiry", "expiry", certExpiryTime)
 
 	// Update user status IN MEMORY with actual certificate expiry and renewal time
-	// The orchestrator will persist this to etcd
+	// The orchestrator will persist this to etcd via the single Status().Update() call
+	// SEMANTIC PROTECTION: Only set statusChanged = true if values actually differ
 	statusChanged := false
+
+	// Capture old values for semantic comparison
+	oldExpiryTime := user.Status.ExpiryTime
+	oldNextRenewalAt := user.Status.NextRenewalAt
 
 	// Update ExpiryTime
 	newExpiryTime := certExpiryTime.Format(time.RFC3339)
-	if user.Status.ExpiryTime != newExpiryTime {
+	if oldExpiryTime != newExpiryTime {
 		user.Status.ExpiryTime = newExpiryTime
 		statusChanged = true
+		logger.Info("ExpiryTime changed", "old", oldExpiryTime, "new", newExpiryTime)
 	}
 
 	// Calculate renewal time using proper renewal logic that respects RenewBefore
@@ -232,10 +240,20 @@ func EnsureCertKubeconfigWithDuration(ctx context.Context, r client.Client, user
 			"renewBefore", user.Spec.Auth.RenewBefore)
 	}
 
-	// Update NextRenewalAt if changed
-	if !helpers.SemanticTimePtrMatch(user.Status.NextRenewalAt, newNextRenewalAt) {
+	// Update NextRenewalAt if changed (semantic comparison)
+	if !helpers.SemanticTimePtrMatch(oldNextRenewalAt, newNextRenewalAt) {
 		user.Status.NextRenewalAt = newNextRenewalAt
 		statusChanged = true
+
+		oldStr := "nil"
+		if oldNextRenewalAt != nil {
+			oldStr = oldNextRenewalAt.Format(time.RFC3339)
+		}
+		newStr := "nil"
+		if newNextRenewalAt != nil {
+			newStr = newNextRenewalAt.Format(time.RFC3339)
+		}
+		logger.Info("NextRenewalAt changed", "old", oldStr, "new", newStr)
 	}
 
 	// 10. Save kubeconfig

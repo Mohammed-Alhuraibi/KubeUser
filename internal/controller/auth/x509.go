@@ -31,10 +31,12 @@ func NewX509Provider(c client.Client, eventRecorder record.EventRecorder) *X509P
 }
 
 // Ensure creates or updates x509 certificates and kubeconfig for the user.
-// Returns (bool, *ctrl.Result, error) where:
-// - bool: true if status fields were changed
-// - *ctrl.Result: non-nil if immediate requeue is needed
+// Returns (statusChanged bool, result *ctrl.Result, error) where:
+// - statusChanged: true if user.Status fields (ExpiryTime, NextRenewalAt, Phase, etc.) were modified in memory
+// - result: non-nil if immediate requeue is needed (CSR pending, Shadow Secret created, etc.)
 // - error: actual error that should stop reconciliation
+// This method does NOT perform any r.Status().Update() calls - it only modifies the user object in memory.
+// The caller (main controller orchestrator) is responsible for persisting status changes to etcd.
 func (p *X509Provider) Ensure(ctx context.Context, user *authv1alpha1.User) (bool, *ctrl.Result, error) {
 	logger := logf.FromContext(ctx)
 	logger.Info("Ensuring x509 authentication", "user", user.Name, "autoRenew", user.Spec.Auth.AutoRenew)
@@ -114,13 +116,14 @@ func (p *X509Provider) Ensure(ctx context.Context, user *authv1alpha1.User) (boo
 	}
 
 	// Use existing certificate logic for initial creation or non-renewal updates
-	statusChanged, requeue, err := certs.EnsureCertKubeconfigWithDuration(ctx, p.client, user, duration)
+	// CRITICAL: Capture statusChanged from certs package to bubble up to orchestrator
+	statusChanged, requeueNeeded, err := certs.EnsureCertKubeconfigWithDuration(ctx, p.client, user, duration)
 	if err != nil {
-		return false, nil, fmt.Errorf("failed to ensure certificate kubeconfig: %v", err)
+		return statusChanged, nil, fmt.Errorf("failed to ensure certificate kubeconfig: %v", err)
 	}
 
-	if requeue {
-		logger.Info("Certificate processing requires requeue")
+	if requeueNeeded {
+		logger.Info("Certificate processing requires requeue", "statusChanged", statusChanged)
 		return statusChanged, &ctrl.Result{Requeue: true}, nil
 	}
 
