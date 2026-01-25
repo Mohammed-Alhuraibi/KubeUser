@@ -37,12 +37,12 @@ func TestValidateAuthSpec(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name: "valid x509 auth",
+			name: "valid x509 auth - production safe TTL",
 			user: &authv1alpha1.User{
 				Spec: authv1alpha1.UserSpec{
 					Auth: authv1alpha1.AuthSpec{
 						Type: AuthTypeX509,
-						TTL:  "72h",
+						TTL:  "720h", // 30 days - production safe
 					},
 				},
 			},
@@ -84,12 +84,12 @@ func TestValidateAuthSpec(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "duration too short",
+			name: "duration too short - production hardening enforces 24h minimum",
 			user: &authv1alpha1.User{
 				Spec: authv1alpha1.UserSpec{
 					Auth: authv1alpha1.AuthSpec{
 						Type: AuthTypeX509,
-						TTL:  "5m", // Less than 10 minutes (new default minimum)
+						TTL:  "12h", // Less than 24 hours (production minimum)
 					},
 				},
 			},
@@ -126,15 +126,15 @@ func TestGetAuthDuration(t *testing.T) {
 		expected time.Duration
 	}{
 		{
-			name: "custom duration",
+			name: "custom duration - production safe",
 			user: &authv1alpha1.User{
 				Spec: authv1alpha1.UserSpec{
 					Auth: authv1alpha1.AuthSpec{
-						TTL: "72h",
+						TTL: "720h", // 30 days
 					},
 				},
 			},
-			expected: 72 * time.Hour,
+			expected: 720 * time.Hour,
 		},
 		{
 			name: "default duration",
@@ -182,7 +182,7 @@ func TestManager(t *testing.T) {
 		Spec: authv1alpha1.UserSpec{
 			Auth: authv1alpha1.AuthSpec{
 				Type: AuthTypeX509,
-				TTL:  "72h",
+				TTL:  "720h", // 30 days - production safe
 			},
 		},
 	}
@@ -223,19 +223,19 @@ func TestGetMinimumDuration(t *testing.T) {
 		expected time.Duration
 	}{
 		{
-			name:     "default minimum (no env var)",
+			name:     "default minimum (no env var) - production hardened to 24h",
 			envValue: "",
-			expected: 10 * time.Minute,
+			expected: 24 * time.Hour,
 		},
 		{
-			name:     "custom minimum via env var",
+			name:     "custom minimum via env var for testing",
 			envValue: "5m",
 			expected: 5 * time.Minute,
 		},
 		{
-			name:     "invalid env var falls back to default",
+			name:     "invalid env var falls back to production default (24h)",
 			envValue: "invalid",
-			expected: 10 * time.Minute,
+			expected: 24 * time.Hour,
 		},
 	}
 

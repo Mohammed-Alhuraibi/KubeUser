@@ -10,10 +10,10 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"time"
 
 	authv1alpha1 "github.com/openkube-hub/KubeUser/api/v1alpha1"
 	"github.com/openkube-hub/KubeUser/internal/controller/auth"
-	"github.com/openkube-hub/KubeUser/internal/controller/renewal"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -217,16 +217,49 @@ func (w *UserWebhook) ValidateDelete(ctx context.Context, obj runtime.Object) (a
 }
 
 // validateAuthSpec validates the auth specification using the auth package validation
+// WEBHOOK MODE: Strictly rejects dangerous configurations (Fail-Fast architecture)
 func (w *UserWebhook) validateAuthSpec(user *authv1alpha1.User) error {
-	// Use the existing auth package validation
+	// Use the existing auth package validation (enforces 24h minimum TTL)
 	if err := auth.ValidateAuthSpec(user); err != nil {
 		return fmt.Errorf("invalid auth specification: %w", err)
 	}
 
-	// Also validate renewal configuration if auto-renewal is enabled
+	// PRODUCTION HARDENING: Strict webhook validation for renewal configuration
 	if user.Spec.Auth.AutoRenew {
-		if err := renewal.ValidateRenewalConfig(user); err != nil {
-			return fmt.Errorf("invalid renewal configuration: %w", err)
+		// Parse certificate duration
+		var certDuration time.Duration
+		if user.Spec.Auth.TTL != "" {
+			d, err := time.ParseDuration(user.Spec.Auth.TTL)
+			if err != nil {
+				return fmt.Errorf("invalid TTL format: %v", err)
+			}
+			certDuration = d
+		} else {
+			certDuration = 90 * 24 * time.Hour // Default 90 days
+		}
+
+		// Validate renewBefore if specified
+		if user.Spec.Auth.RenewBefore != nil {
+			renewBefore := user.Spec.Auth.RenewBefore.Duration
+
+			if renewBefore <= 0 {
+				return fmt.Errorf("renewBefore must be positive, got: %v", renewBefore)
+			}
+
+			// WEBHOOK ENFORCEMENT: Strictly reject renewBefore > 50% of TTL
+			// This prevents Thundering Herd loops at the CLI level
+			maxAllowed := time.Duration(float64(certDuration) * 0.5)
+			if renewBefore > maxAllowed {
+				return fmt.Errorf("renewBefore (%v) exceeds 50%% of TTL (%v). Maximum allowed: %v. This prevents aggressive renewal loops and API-server exhaustion",
+					renewBefore, certDuration, maxAllowed)
+			}
+
+			// WEBHOOK ENFORCEMENT: Reject renewBefore that violates 5-minute safety floor
+			const safetyFloor = 5 * time.Minute
+			if certDuration-renewBefore < safetyFloor {
+				return fmt.Errorf("renewBefore (%v) leaves less than 5 minutes of certificate life (TTL: %v). This would cause immediate renewal loops. Minimum certificate life required: 5m",
+					renewBefore, certDuration)
+			}
 		}
 	}
 

@@ -127,8 +127,15 @@ func (rm *RotationManager) continueRotationFromShadow(ctx context.Context, user 
 	// Extract rotation metadata from Shadow Secret
 	csrName, exists := shadowSecret.Annotations["auth.openkube.io/csr-name"]
 	if !exists {
-		logger.Error(nil, "Shadow Secret missing CSR name annotation", "shadowSecret", shadowSecret.Name)
-		return false, nil, fmt.Errorf("shadow secret missing CSR name annotation")
+		logger.Error(nil, "Shadow Secret missing CSR name annotation - non-recoverable, cleaning up", "shadowSecret", shadowSecret.Name)
+		rm.eventRecorder.Event(user, "Warning", "RotationCorrupted", "Shadow Secret missing CSR annotation, resetting rotation state")
+
+		// State Machine Recovery: Delete corrupted Shadow Secret to allow fresh rotation
+		if err := rm.deleteShadowSecret(ctx, username); err != nil {
+			logger.Error(err, "Failed to cleanup corrupted shadow secret")
+		}
+
+		return false, nil, fmt.Errorf("shadow secret missing CSR name annotation (cleaned up for recovery)")
 	}
 
 	logger.Info("Continuing rotation from Shadow Secret", "csrName", csrName, "currentPhase", user.Status.Phase, "currentRotationStep", user.Status.RotationStep)
@@ -144,7 +151,15 @@ func (rm *RotationManager) continueRotationFromShadow(ctx context.Context, user 
 	// Extract private key from Shadow Secret
 	keyPEM, exists := shadowSecret.Data["key.pem"]
 	if !exists {
-		return statusChanged, nil, fmt.Errorf("shadow secret missing private key")
+		logger.Error(nil, "Shadow Secret missing private key - non-recoverable, cleaning up", "shadowSecret", shadowSecret.Name)
+		rm.eventRecorder.Event(user, "Warning", "RotationCorrupted", "Shadow Secret missing private key, resetting rotation state")
+
+		// State Machine Recovery: Delete corrupted Shadow Secret to allow fresh rotation
+		if err := rm.deleteShadowSecret(ctx, username); err != nil {
+			logger.Error(err, "Failed to cleanup corrupted shadow secret")
+		}
+
+		return statusChanged, nil, fmt.Errorf("shadow secret missing private key (cleaned up for recovery)")
 	}
 
 	// CRITICAL FIX: Ensure CSR exists before checking approval status

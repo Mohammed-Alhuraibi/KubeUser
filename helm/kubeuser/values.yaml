@@ -111,7 +111,7 @@ metrics:
 # Environment variables
 env:
   # Kubernetes API server endpoint
-  KUBERNETES_API_SERVER: "https://kubernetes.default.svc"
+  KUBERNETES_API_SERVER: "https://127.0.0.1:42541"
   # Kubernetes cluster domain (default: cluster.local)
   # Override this if your cluster uses a different domain
   CLUSTER_DOMAIN: "cluster.local"

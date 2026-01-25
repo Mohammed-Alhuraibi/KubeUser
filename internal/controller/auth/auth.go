@@ -156,15 +156,15 @@ func GetAuthDuration(user *authv1alpha1.User) time.Duration {
 
 // getMinimumDuration returns the minimum allowed duration for certificates
 // Can be overridden with KUBEUSER_MIN_DURATION environment variable for testing
-// Note: Kubernetes requires a minimum of 10 minutes (600 seconds) for CSR expirationSeconds
+// Production default is 24h to prevent Thundering Herd loops and API-server exhaustion
 func getMinimumDuration() time.Duration {
 	if minDurStr := os.Getenv("KUBEUSER_MIN_DURATION"); minDurStr != "" {
 		if minDur, err := time.ParseDuration(minDurStr); err == nil {
 			return minDur
 		}
 	}
-	// Default minimum is 10 minutes (Kubernetes minimum requirement)
-	return 10 * time.Minute
+	// Production minimum is 24 hours to prevent excessive renewal loops
+	return 24 * time.Hour
 }
 
 // ValidateRenewalConfig validates the renewal configuration in the user spec

@@ -166,10 +166,13 @@ func (p *X509Provider) checkIfTTLChanged(ctx context.Context, user *authv1alpha1
 		return p.estimateTTLChange(ctx, user, desiredDuration, certExpiry, timeUntilExpiry)
 	}
 
-	logger.Info("Extracted actual certificate TTL",
+	logger.Info("Extracted actual certificate TTL for production debugging",
 		"actualTTL", actualTTL,
+		"actualTTLSeconds", actualTTL.Seconds(),
 		"issuedAt", issuedAt.Format(time.RFC3339),
-		"desiredTTL", desiredDuration)
+		"certExpiry", certExpiry.Format(time.RFC3339),
+		"desiredTTL", desiredDuration,
+		"desiredTTLSeconds", desiredDuration.Seconds())
 
 	// Compare desired TTL with actual TTL
 	// Allow for some tolerance (10%) to avoid unnecessary rotations due to minor timing differences
@@ -185,11 +188,15 @@ func (p *X509Provider) checkIfTTLChanged(ctx context.Context, user *authv1alpha1
 
 	needsRotation := difference > tolerance
 
-	logger.Info("TTL change check",
+	logger.Info("TTL change check - production reissue decision",
 		"desiredTTL", desiredDuration,
+		"desiredTTLSeconds", desiredDuration.Seconds(),
 		"actualTTL", actualTTL,
+		"actualTTLSeconds", actualTTL.Seconds(),
 		"difference", difference,
+		"differenceSeconds", difference.Seconds(),
 		"tolerance", tolerance,
+		"toleranceSeconds", tolerance.Seconds(),
 		"needsRotation", needsRotation)
 
 	return needsRotation, nil

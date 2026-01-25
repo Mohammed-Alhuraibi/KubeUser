@@ -162,6 +162,8 @@ func (rc *RenewalCalculator) UpdateUserRenewalStatus(user *authv1alpha1.User, ce
 }
 
 // ValidateRenewalConfig validates the renewal configuration in the user spec
+// Controller mode: Auto-corrects dangerous values and logs warnings
+// Webhook mode: Should reject dangerous configurations (handled in webhook layer)
 func ValidateRenewalConfig(user *authv1alpha1.User) error {
 	if !user.Spec.Auth.AutoRenew {
 		return nil
@@ -185,34 +187,32 @@ func ValidateRenewalConfig(user *authv1alpha1.User) error {
 			return fmt.Errorf("renewBefore must be positive")
 		}
 
-		// Calculate a proportional safety buffer (10% of TTL), capped at 2 minutes.
-		// For a 10m cert, this is 1 minute.
-		dynamicBuffer := time.Duration(float64(certDuration) * 0.1)
-		if dynamicBuffer > 2*time.Minute {
-			dynamicBuffer = 2 * time.Minute
-		}
-
-		// 1. Cap early renewal at 90% of TTL to prevent "immediate renewal loops"
-		maxAllowed := time.Duration(float64(certDuration) * 0.9)
+		// PRODUCTION HARDENING: Strictly cap renewBefore at 50% of TTL
+		// This prevents aggressive renewal loops and API-server exhaustion
+		maxAllowed := time.Duration(float64(certDuration) * 0.5)
 		if renewBefore > maxAllowed {
+			// Controller auto-corrects in memory and logs warning
 			user.Spec.Auth.RenewBefore = &metav1.Duration{Duration: maxAllowed}
-			return fmt.Errorf("renewBefore too aggressive, capped at 90%% (%v)", maxAllowed)
+			return fmt.Errorf("renewBefore too aggressive, capped at 50%% (%v) for production stability", maxAllowed)
 		}
 
-		// 2. Enforce the safety floor (dynamicBuffer)
-		if certDuration-renewBefore < dynamicBuffer {
-			fixed := certDuration - dynamicBuffer
+		// PRODUCTION HARDENING: Fixed 5-minute safety floor
+		// Ensures even short-lived test certificates have guaranteed life before renewal
+		const safetyFloor = 5 * time.Minute
+		if certDuration-renewBefore < safetyFloor {
+			fixed := certDuration - safetyFloor
 			if fixed <= 0 {
 				fixed = time.Duration(float64(certDuration) * 0.5) // Fallback to 50%
 			}
 			user.Spec.Auth.RenewBefore = &metav1.Duration{Duration: fixed}
-			return fmt.Errorf("renewBefore too close to expiry, auto-corrected to %v for safety", fixed)
+			return fmt.Errorf("renewBefore too close to expiry, auto-corrected to %v for safety (5-minute buffer)", fixed)
 		}
 	}
 	return nil
 }
 
 // CalculateNextRenewal calculates the next renewal time based on certificate info
+// PRODUCTION HARDENING: Uses fixed 5-minute safety floor instead of proportional buffer
 func CalculateNextRenewal(issuedAt, expiry time.Time, renewBefore *metav1.Duration) metav1.Time {
 	certDuration := expiry.Sub(issuedAt)
 	var renewalTime time.Time
@@ -224,13 +224,11 @@ func CalculateNextRenewal(issuedAt, expiry time.Time, renewBefore *metav1.Durati
 		renewalTime = expiry.Add(-renewalBuffer)
 	}
 
-	// Apply the same proportional safety floor used in validation
-	dynamicBuffer := time.Duration(float64(certDuration) * 0.1)
-	if dynamicBuffer > 1*time.Minute {
-		dynamicBuffer = 1 * time.Minute
-	}
-
-	safetyFloorTime := expiry.Add(-dynamicBuffer)
+	// PRODUCTION HARDENING: Fixed 5-minute safety floor
+	// Guarantees at least 5 minutes of certificate life before renewal triggers
+	// Prevents immediate renewal loops even for short-lived test certificates
+	const safetyFloor = 5 * time.Minute
+	safetyFloorTime := expiry.Add(-safetyFloor)
 	if renewalTime.After(safetyFloorTime) {
 		renewalTime = safetyFloorTime
 	}

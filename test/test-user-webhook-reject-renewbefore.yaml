@@ -1,0 +1,12 @@
+apiVersion: auth.openkube.io/v1alpha1
+kind: User
+metadata:
+  name: aggressive-renewal-user
+spec:
+  auth:
+    type: x509
+    ttl: "720h"  # 30 days
+    renewBefore: "500h"  # WILL BE REJECTED: 69% of TTL, exceeds 50% cap
+    autoRenew: true
+  clusterRoles:
+    - existingClusterRole: view
