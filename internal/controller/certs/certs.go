@@ -36,14 +36,18 @@ const (
 	inClusterCAPath = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 )
 
-func EnsureCertKubeconfig(ctx context.Context, r client.Client, user *authv1alpha1.User) (bool, error) {
+func EnsureCertKubeconfig(ctx context.Context, r client.Client, user *authv1alpha1.User) (bool, bool, error) {
 	// Use default duration (3 months)
 	defaultDuration := 90 * 24 * time.Hour
 	return EnsureCertKubeconfigWithDuration(ctx, r, user, defaultDuration)
 }
 
-// EnsureCertKubeconfigWithDuration ensures certificate kubeconfig with custom duration
-func EnsureCertKubeconfigWithDuration(ctx context.Context, r client.Client, user *authv1alpha1.User, duration time.Duration) (bool, error) {
+// EnsureCertKubeconfigWithDuration ensures certificate kubeconfig with custom duration.
+// Returns (statusChanged bool, requeue bool, error) where:
+// - statusChanged: true if user status fields were modified in memory
+// - requeue: true if the operation needs to be requeued
+// - error: any error that occurred
+func EnsureCertKubeconfigWithDuration(ctx context.Context, r client.Client, user *authv1alpha1.User, duration time.Duration) (bool, bool, error) {
 	username := user.Name
 	userNamespace := helpers.GetKubeUserNamespace()
 	keySecretName := fmt.Sprintf("%s-key", username)
@@ -54,9 +58,9 @@ func EnsureCertKubeconfigWithDuration(ctx context.Context, r client.Client, user
 	var ns corev1.Namespace
 	if err := r.Get(ctx, types.NamespacedName{Name: userNamespace}, &ns); err != nil {
 		if apierrors.IsNotFound(err) {
-			return false, fmt.Errorf("target namespace '%s' does not exist - please create it before deploying KubeUser or use Helm with --create-namespace", userNamespace)
+			return false, false, fmt.Errorf("target namespace '%s' does not exist - please create it before deploying KubeUser or use Helm with --create-namespace", userNamespace)
 		}
-		return false, fmt.Errorf("failed to verify namespace '%s': %w", userNamespace, err)
+		return false, false, fmt.Errorf("failed to verify namespace '%s': %w", userNamespace, err)
 	}
 
 	// Check if certificate needs rotation
@@ -65,7 +69,7 @@ func EnsureCertKubeconfigWithDuration(ctx context.Context, r client.Client, user
 
 	needsRotation, err := checkCertificateRotation(ctx, r, cfgSecretName, rotationThreshold)
 	if err != nil {
-		return false, fmt.Errorf("failed to check certificate rotation: %w", err)
+		return false, false, fmt.Errorf("failed to check certificate rotation: %w", err)
 	}
 
 	if needsRotation {
@@ -73,7 +77,7 @@ func EnsureCertKubeconfigWithDuration(ctx context.Context, r client.Client, user
 		logger := logf.FromContext(ctx)
 		logger.Info("Certificate needs rotation, cleaning up existing resources", "user", username)
 		if err := cleanupCertificateResources(ctx, r, cfgSecretName, csrName); err != nil {
-			return false, fmt.Errorf("failed to cleanup certificate resources: %w", err)
+			return false, false, fmt.Errorf("failed to cleanup certificate resources: %w", err)
 		}
 	}
 
@@ -84,7 +88,7 @@ func EnsureCertKubeconfigWithDuration(ctx context.Context, r client.Client, user
 	if apierrors.IsNotFound(err) {
 		key, err := rsa.GenerateKey(rand.Reader, 2048)
 		if err != nil {
-			return false, err
+			return false, false, err
 		}
 		keyPEM = pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
 		keySecret = corev1.Secret{
@@ -93,10 +97,10 @@ func EnsureCertKubeconfigWithDuration(ctx context.Context, r client.Client, user
 			Data:       map[string][]byte{"key.pem": keyPEM},
 		}
 		if err := r.Create(ctx, &keySecret); err != nil {
-			return false, err
+			return false, false, err
 		}
 	} else if err != nil {
-		return false, err
+		return false, false, err
 	} else {
 		keyPEM = keySecret.Data["key.pem"]
 	}
@@ -104,13 +108,13 @@ func EnsureCertKubeconfigWithDuration(ctx context.Context, r client.Client, user
 	// 2. If kubeconfig already exists, return
 	var existingCfg corev1.Secret
 	if err := r.Get(ctx, types.NamespacedName{Name: cfgSecretName, Namespace: userNamespace}, &existingCfg); err == nil {
-		return false, nil
+		return false, false, nil
 	}
 
 	// 3. CSR from key
 	csrPEM, err := csrFromKey(username, keyPEM)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 
 	// 4. Create/get CSR
@@ -130,11 +134,11 @@ func EnsureCertKubeconfigWithDuration(ctx context.Context, r client.Client, user
 			},
 		}
 		if err := r.Create(ctx, &csr); err != nil {
-			return false, err
+			return false, false, err
 		}
-		return true, nil
+		return false, true, nil
 	} else if err != nil {
-		return false, err
+		return false, false, err
 	}
 
 	// 5. Approve CSR if not approved
@@ -153,21 +157,21 @@ func EnsureCertKubeconfigWithDuration(ctx context.Context, r client.Client, user
 			LastUpdateTime: metav1.Now(),
 		})
 		if err := r.SubResource("approval").Update(ctx, &csr); err != nil {
-			return false, err
+			return false, false, err
 		}
-		return true, nil
+		return false, true, nil
 	}
 
 	// 6. Wait for cert
 	if len(csr.Status.Certificate) == 0 {
-		return true, nil
+		return false, true, nil
 	}
 	signedCert := csr.Status.Certificate
 
 	// 7. Cluster CA
 	caDataB64, err := getClusterCABase64(ctx, r)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 
 	// 8. API server URL
@@ -190,20 +194,29 @@ func EnsureCertKubeconfigWithDuration(ctx context.Context, r client.Client, user
 	// Try to extract certificate expiry with proper format detection
 	certExpiryTime, err := extractCertificateExpiryWithFormatDetection(signedCert)
 	if err != nil {
-		return false, fmt.Errorf("failed to extract certificate expiry: %w", err)
+		return false, false, fmt.Errorf("failed to extract certificate expiry: %w", err)
 	}
 	logger.Info("Successfully extracted certificate expiry", "expiry", certExpiryTime)
 
-	// Update user status with actual certificate expiry and renewal time
-	user.Status.ExpiryTime = certExpiryTime.Format(time.RFC3339)
+	// Update user status IN MEMORY with actual certificate expiry and renewal time
+	// The orchestrator will persist this to etcd
+	statusChanged := false
+
+	// Update ExpiryTime
+	newExpiryTime := certExpiryTime.Format(time.RFC3339)
+	if user.Status.ExpiryTime != newExpiryTime {
+		user.Status.ExpiryTime = newExpiryTime
+		statusChanged = true
+	}
 
 	// Calculate renewal time using proper renewal logic that respects RenewBefore
 	issuedAt := time.Now() // Certificate was just issued
 
 	// Only set NextRenewalAt if auto-renewal is enabled
+	var newNextRenewalAt *metav1.Time
 	if user.Spec.Auth.AutoRenew {
 		nextRenewal := calculateNextRenewal(issuedAt, certExpiryTime, user.Spec.Auth.RenewBefore)
-		user.Status.NextRenewalAt = &nextRenewal
+		newNextRenewalAt = &nextRenewal
 
 		logger.Info("Certificate times calculated",
 			"expiry", certExpiryTime.Format(time.RFC3339),
@@ -211,7 +224,7 @@ func EnsureCertKubeconfigWithDuration(ctx context.Context, r client.Client, user
 			"renewBefore", user.Spec.Auth.RenewBefore)
 	} else {
 		// Explicitly clear the field if auto-renewal is disabled
-		user.Status.NextRenewalAt = nil
+		newNextRenewalAt = nil
 
 		logger.Info("Certificate times calculated",
 			"expiry", certExpiryTime.Format(time.RFC3339),
@@ -219,8 +232,10 @@ func EnsureCertKubeconfigWithDuration(ctx context.Context, r client.Client, user
 			"renewBefore", user.Spec.Auth.RenewBefore)
 	}
 
-	if err := r.Status().Update(ctx, user); err != nil {
-		return false, fmt.Errorf("failed to update user status with certificate expiry: %w", err)
+	// Update NextRenewalAt if changed
+	if !helpers.SemanticTimePtrMatch(user.Status.NextRenewalAt, newNextRenewalAt) {
+		user.Status.NextRenewalAt = newNextRenewalAt
+		statusChanged = true
 	}
 
 	// 10. Save kubeconfig
@@ -229,7 +244,8 @@ func EnsureCertKubeconfigWithDuration(ctx context.Context, r client.Client, user
 		Type:       corev1.SecretTypeOpaque,
 		Data:       map[string][]byte{"config": kcfg},
 	}
-	return false, helpers.CreateOrUpdate(ctx, r, cfgSecret)
+	err = helpers.CreateOrUpdate(ctx, r, cfgSecret)
+	return statusChanged, false, err
 }
 
 func csrFromKey(username string, keyPEM []byte) ([]byte, error) {
@@ -479,6 +495,83 @@ func BuildCertKubeconfig(apiServer, caDataB64 string, signedCert, keyPEM []byte,
 // ExtractCertificateExpiryWithFormatDetection extracts certificate expiry (exported for renewal package)
 func ExtractCertificateExpiryWithFormatDetection(certData []byte) (time.Time, error) {
 	return extractCertificateExpiryWithFormatDetection(certData)
+}
+
+// ExtractCertificateTTL extracts the actual TTL and issued time from the user's certificate
+// by reading the kubeconfig secret and parsing the certificate
+func ExtractCertificateTTL(ctx context.Context, r client.Client, username string) (time.Duration, time.Time, error) {
+	logger := logf.FromContext(ctx)
+	userNamespace := helpers.GetKubeUserNamespace()
+	cfgSecretName := fmt.Sprintf("%s-kubeconfig", username)
+
+	// Get the kubeconfig secret
+	var kubeconfigSecret corev1.Secret
+	err := r.Get(ctx, types.NamespacedName{Name: cfgSecretName, Namespace: userNamespace}, &kubeconfigSecret)
+	if err != nil {
+		return 0, time.Time{}, fmt.Errorf("failed to get kubeconfig secret: %w", err)
+	}
+
+	// Extract certificate from kubeconfig
+	kubeconfigData := kubeconfigSecret.Data["config"]
+	if kubeconfigData == nil {
+		return 0, time.Time{}, fmt.Errorf("kubeconfig data not found in secret")
+	}
+
+	certData, err := extractClientCertFromKubeconfig(kubeconfigData)
+	if err != nil {
+		return 0, time.Time{}, fmt.Errorf("failed to extract certificate from kubeconfig: %w", err)
+	}
+
+	// Parse the certificate to get NotBefore and NotAfter
+	cert, err := parseCertificateFromData(certData)
+	if err != nil {
+		return 0, time.Time{}, fmt.Errorf("failed to parse certificate: %w", err)
+	}
+
+	// Calculate actual TTL
+	actualTTL := cert.NotAfter.Sub(cert.NotBefore)
+	issuedAt := cert.NotBefore
+
+	logger.Info("Extracted certificate TTL",
+		"username", username,
+		"issuedAt", issuedAt.Format(time.RFC3339),
+		"expiresAt", cert.NotAfter.Format(time.RFC3339),
+		"actualTTL", actualTTL)
+
+	return actualTTL, issuedAt, nil
+}
+
+// parseCertificateFromData parses a certificate from various formats (base64, PEM, DER)
+func parseCertificateFromData(certData []byte) (*x509.Certificate, error) {
+	// Try base64-encoded PEM first (most common in kubeconfig)
+	decoded, err := base64.StdEncoding.DecodeString(string(certData))
+	if err == nil {
+		// Successfully decoded base64, now try to parse as PEM
+		block, _ := pem.Decode(decoded)
+		if block != nil && block.Type == "CERTIFICATE" {
+			cert, err := x509.ParseCertificate(block.Bytes)
+			if err == nil {
+				return cert, nil
+			}
+		}
+	}
+
+	// Try direct PEM
+	block, _ := pem.Decode(certData)
+	if block != nil && block.Type == "CERTIFICATE" {
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err == nil {
+			return cert, nil
+		}
+	}
+
+	// Try direct DER
+	cert, err := x509.ParseCertificate(certData)
+	if err == nil {
+		return cert, nil
+	}
+
+	return nil, fmt.Errorf("failed to parse certificate from any known format")
 }
 
 // calculateNextRenewal calculates the next renewal time based on certificate info

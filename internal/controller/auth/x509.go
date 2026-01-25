@@ -48,6 +48,36 @@ func (p *X509Provider) Ensure(ctx context.Context, user *authv1alpha1.User) (boo
 	duration := GetAuthDuration(user)
 	logger.Info("Using certificate duration", "duration", duration)
 
+	// CRITICAL: Check if TTL has changed and force rotation if needed
+	if user.Status.ExpiryTime != "" {
+		needsTTLRotation, err := p.checkIfTTLChanged(ctx, user, duration)
+		if err != nil {
+			logger.Error(err, "Failed to check TTL change")
+		} else if needsTTLRotation {
+			logger.Info("TTL has changed, forcing certificate rotation", "desiredTTL", duration)
+
+			// Force rotation by triggering the rotation manager
+			statusChanged, result, err := p.rotationManager.RotateUserCertificate(ctx, user, duration)
+			if err != nil {
+				logger.Error(err, "Certificate rotation failed")
+				user.Status.Phase = "Error"
+				user.Status.Message = fmt.Sprintf("Certificate renewal failed: %v", err)
+				return true, nil, fmt.Errorf("certificate renewal failed: %w", err)
+			}
+
+			if result != nil {
+				logger.Info("Certificate rotation requires immediate requeue")
+				return statusChanged, result, nil
+			}
+
+			if statusChanged {
+				logger.Info("Certificate rotation completed successfully due to TTL change")
+			}
+
+			return statusChanged, nil, nil
+		}
+	}
+
 	// Check if auto-renewal is enabled and certificate needs renewal
 	if user.Spec.Auth.AutoRenew {
 		needsRenewal, err := p.checkIfRenewalNeeded(ctx, user, duration)
@@ -84,18 +114,133 @@ func (p *X509Provider) Ensure(ctx context.Context, user *authv1alpha1.User) (boo
 	}
 
 	// Use existing certificate logic for initial creation or non-renewal updates
-	requeue, err := certs.EnsureCertKubeconfigWithDuration(ctx, p.client, user, duration)
+	statusChanged, requeue, err := certs.EnsureCertKubeconfigWithDuration(ctx, p.client, user, duration)
 	if err != nil {
 		return false, nil, fmt.Errorf("failed to ensure certificate kubeconfig: %v", err)
 	}
 
 	if requeue {
 		logger.Info("Certificate processing requires requeue")
-		return false, &ctrl.Result{Requeue: true}, nil
+		return statusChanged, &ctrl.Result{Requeue: true}, nil
 	}
 
-	logger.Info("Successfully ensured x509 authentication", "user", user.Name)
-	return false, nil, nil
+	logger.Info("Successfully ensured x509 authentication", "user", user.Name, "statusChanged", statusChanged)
+	return statusChanged, nil, nil
+}
+
+// checkIfTTLChanged determines if the desired TTL differs from the current certificate's TTL
+// by extracting and analyzing the actual certificate from the kubeconfig secret
+func (p *X509Provider) checkIfTTLChanged(ctx context.Context, user *authv1alpha1.User, desiredDuration time.Duration) (bool, error) {
+	logger := logf.FromContext(ctx)
+
+	// Parse current certificate expiry from status
+	if user.Status.ExpiryTime == "" {
+		logger.Info("No expiry time in status, cannot check TTL change")
+		return false, nil
+	}
+
+	certExpiry, err := time.Parse(time.RFC3339, user.Status.ExpiryTime)
+	if err != nil {
+		logger.Error(err, "Failed to parse certificate expiry time", "expiryTime", user.Status.ExpiryTime)
+		return false, err
+	}
+
+	now := time.Now()
+	timeUntilExpiry := certExpiry.Sub(now)
+
+	// If certificate is already expired or about to expire, don't trigger TTL rotation
+	// Let the normal renewal logic handle it
+	if timeUntilExpiry < 5*time.Minute {
+		logger.Info("Certificate expiring soon, skipping TTL check", "timeUntilExpiry", timeUntilExpiry)
+		return false, nil
+	}
+
+	// Extract the actual certificate to determine its real issued time and TTL
+	actualTTL, issuedAt, err := certs.ExtractCertificateTTL(ctx, p.client, user.Name)
+	if err != nil {
+		logger.Error(err, "Failed to extract certificate TTL from secret, falling back to estimation")
+		// Fallback to estimation if we can't extract the certificate
+		return p.estimateTTLChange(ctx, user, desiredDuration, certExpiry, timeUntilExpiry)
+	}
+
+	logger.Info("Extracted actual certificate TTL",
+		"actualTTL", actualTTL,
+		"issuedAt", issuedAt.Format(time.RFC3339),
+		"desiredTTL", desiredDuration)
+
+	// Compare desired TTL with actual TTL
+	// Allow for some tolerance (10%) to avoid unnecessary rotations due to minor timing differences
+	tolerance := desiredDuration / 10
+	if tolerance < 1*time.Minute {
+		tolerance = 1 * time.Minute // Minimum tolerance
+	}
+
+	difference := actualTTL - desiredDuration
+	if difference < 0 {
+		difference = -difference
+	}
+
+	needsRotation := difference > tolerance
+
+	logger.Info("TTL change check",
+		"desiredTTL", desiredDuration,
+		"actualTTL", actualTTL,
+		"difference", difference,
+		"tolerance", tolerance,
+		"needsRotation", needsRotation)
+
+	return needsRotation, nil
+}
+
+// estimateTTLChange is a fallback method when we can't extract the actual certificate
+func (p *X509Provider) estimateTTLChange(ctx context.Context, user *authv1alpha1.User, desiredDuration time.Duration, certExpiry time.Time, timeUntilExpiry time.Duration) (bool, error) {
+	logger := logf.FromContext(ctx)
+
+	var estimatedOriginalTTL time.Duration
+
+	// If we have NextRenewalAt, we can calculate more accurately
+	if user.Status.NextRenewalAt != nil && user.Spec.Auth.RenewBefore != nil {
+		renewBefore := user.Spec.Auth.RenewBefore.Duration
+		renewalTime := user.Status.NextRenewalAt.Time
+
+		// Original TTL = time from (expiry - renewBefore) to expiry
+		// But we need to account for when the cert was actually issued
+		// This is an approximation
+		estimatedOriginalTTL = certExpiry.Sub(renewalTime) + renewBefore
+	} else {
+		// Fallback: assume the certificate was issued recently if it's still fresh
+		// This is less accurate but prevents false positives
+		now := time.Now()
+		percentRemaining := timeUntilExpiry.Seconds() / certExpiry.Sub(now.Add(-24*time.Hour)).Seconds()
+		if percentRemaining > 0.8 {
+			// Certificate is fresh, estimate original TTL
+			estimatedOriginalTTL = timeUntilExpiry / time.Duration(percentRemaining)
+		} else {
+			// Certificate is older, harder to estimate - use a conservative approach
+			// Don't trigger rotation unless the difference is very significant
+			estimatedOriginalTTL = timeUntilExpiry * 2
+		}
+	}
+
+	// Compare desired TTL with estimated original TTL
+	// Allow for some tolerance (10%) to avoid unnecessary rotations
+	tolerance := desiredDuration / 10
+	difference := estimatedOriginalTTL - desiredDuration
+	if difference < 0 {
+		difference = -difference
+	}
+
+	needsRotation := difference > tolerance
+
+	logger.Info("TTL change check (estimated)",
+		"desiredTTL", desiredDuration,
+		"estimatedOriginalTTL", estimatedOriginalTTL,
+		"difference", difference,
+		"tolerance", tolerance,
+		"needsRotation", needsRotation,
+		"timeUntilExpiry", timeUntilExpiry)
+
+	return needsRotation, nil
 }
 
 // checkIfRenewalNeeded determines if the certificate needs renewal

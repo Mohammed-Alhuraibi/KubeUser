@@ -343,6 +343,7 @@ func (r *UserReconciler) reconcileAuthentication(ctx context.Context, user *auth
 
 // syncStatusFields manages status field synchronization, including NextRenewalAt field management.
 // Returns true if any status fields were changed.
+// This function implements dynamic renewal recalculation to react to Spec changes.
 func (r *UserReconciler) syncStatusFields(ctx context.Context, user *authv1alpha1.User) bool {
 	logger := logf.FromContext(ctx)
 	changed := false
@@ -353,19 +354,36 @@ func (r *UserReconciler) syncStatusFields(ctx context.Context, user *authv1alpha
 		logger.Info("Auto-renewal disabled, explicitly clearing NextRenewalAt field")
 		user.Status.NextRenewalAt = nil
 		changed = true
-	} else if user.Spec.Auth.AutoRenew && user.Status.NextRenewalAt == nil && user.Status.ExpiryTime != "" {
-		// Auto-renewal enabled but NextRenewalAt is not set - calculate it from existing certificate
-		logger.Info("Auto-renewal enabled but NextRenewalAt not set, calculating from existing certificate")
-		if certExpiry, err := time.Parse(time.RFC3339, user.Status.ExpiryTime); err == nil {
-			certDuration := auth.GetAuthDuration(user)
-			issuedAt := certExpiry.Add(-certDuration) // Approximate issued time
-
-			renewalTime := renewal.CalculateNextRenewal(issuedAt, certExpiry, user.Spec.Auth.RenewBefore)
-			user.Status.NextRenewalAt = &renewalTime
-			changed = true
-			logger.Info("Successfully calculated NextRenewalAt field", "nextRenewalAt", renewalTime.Format(time.RFC3339))
-		} else {
+	} else if user.Spec.Auth.AutoRenew && user.Status.ExpiryTime != "" {
+		// Auto-renewal is enabled - check if NextRenewalAt needs recalculation
+		certExpiry, err := time.Parse(time.RFC3339, user.Status.ExpiryTime)
+		if err != nil {
 			logger.Error(err, "Failed to parse existing certificate expiry time", "expiryTime", user.Status.ExpiryTime)
+			return changed
+		}
+
+		// Calculate what NextRenewalAt SHOULD be based on current Spec
+		certDuration := auth.GetAuthDuration(user)
+		issuedAt := certExpiry.Add(-certDuration) // Approximate issued time
+
+		expectedRenewalTime := renewal.CalculateNextRenewal(issuedAt, certExpiry, user.Spec.Auth.RenewBefore)
+
+		// CRITICAL: Compare expected vs actual NextRenewalAt
+		// If they differ, the user changed RenewBefore in the spec - recalculate immediately
+		if !helpers.SemanticTimePtrMatch(user.Status.NextRenewalAt, &expectedRenewalTime) {
+			oldRenewalTime := "nil"
+			if user.Status.NextRenewalAt != nil {
+				oldRenewalTime = user.Status.NextRenewalAt.Format(time.RFC3339)
+			}
+
+			logger.Info("NextRenewalAt needs recalculation due to Spec change",
+				"oldNextRenewalAt", oldRenewalTime,
+				"newNextRenewalAt", expectedRenewalTime.Format(time.RFC3339),
+				"renewBefore", user.Spec.Auth.RenewBefore,
+				"certExpiry", certExpiry.Format(time.RFC3339))
+
+			user.Status.NextRenewalAt = &expectedRenewalTime
+			changed = true
 		}
 	}
 
