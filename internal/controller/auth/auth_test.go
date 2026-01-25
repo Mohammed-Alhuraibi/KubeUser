@@ -49,6 +49,18 @@ func TestValidateAuthSpec(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "empty auth type defaults to x509",
+			user: &authv1alpha1.User{
+				Spec: authv1alpha1.UserSpec{
+					Auth: authv1alpha1.AuthSpec{
+						TTL: "720h",
+						// Type is empty - defaults to x509
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
 			name: "valid oidc auth",
 			user: &authv1alpha1.User{
 				Spec: authv1alpha1.UserSpec{

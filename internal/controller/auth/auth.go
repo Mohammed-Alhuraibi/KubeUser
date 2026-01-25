@@ -81,8 +81,10 @@ func (m *Manager) Revoke(ctx context.Context, user *authv1alpha1.User) error {
 // getProvider returns the appropriate auth provider based on user spec
 func (m *Manager) getProvider(user *authv1alpha1.User) (Provider, error) {
 	authType := user.Spec.Auth.Type
+
+	// Default to x509 if not specified
 	if authType == "" {
-		authType = AuthTypeX509 // default
+		authType = AuthTypeX509
 	}
 
 	switch authType {
@@ -99,12 +101,12 @@ func (m *Manager) getProvider(user *authv1alpha1.User) (Provider, error) {
 func ValidateAuthSpec(user *authv1alpha1.User) error {
 	authSpec := user.Spec.Auth
 
-	// Validate auth type
+	// Validate auth type (allow empty, will default to x509)
 	if authSpec.Type != "" && authSpec.Type != AuthTypeX509 && authSpec.Type != AuthTypeOIDC {
 		return fmt.Errorf("unsupported auth type: %s, must be '%s' or '%s'", authSpec.Type, AuthTypeX509, AuthTypeOIDC)
 	}
 
-	// Validate TTL for x509
+	// Validate TTL for x509 (default if type is empty)
 	if authSpec.Type == AuthTypeX509 || authSpec.Type == "" {
 		if authSpec.TTL != "" {
 			duration, err := time.ParseDuration(authSpec.TTL)

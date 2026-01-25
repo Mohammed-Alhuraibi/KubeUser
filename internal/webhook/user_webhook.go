@@ -218,6 +218,7 @@ func (w *UserWebhook) ValidateDelete(ctx context.Context, obj runtime.Object) (a
 
 // validateAuthSpec validates the auth specification using the auth package validation
 // WEBHOOK MODE: Strictly rejects dangerous configurations (Fail-Fast architecture)
+// Note: Defaults are applied by the API server via CRD defaults (type=x509, ttl=2160h)
 func (w *UserWebhook) validateAuthSpec(user *authv1alpha1.User) error {
 	// Use the existing auth package validation (enforces 24h minimum TTL)
 	if err := auth.ValidateAuthSpec(user); err != nil {
