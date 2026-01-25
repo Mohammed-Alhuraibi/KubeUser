@@ -43,6 +43,40 @@ helm install kubeuser ./helm/kubeuser -n my-existing-namespace
 
 ## Configuration
 
+### Namespace Configuration
+
+**Important:** The controller creates user resources (secrets, kubeconfigs) in the same namespace where it is deployed.
+
+The `KUBEUSER_NAMESPACE` environment variable is automatically set to `{{ .Release.Namespace }}`, ensuring all user resources are created in the Helm release namespace.
+
+**Recommended Setup:**
+```bash
+# Install controller and user resources in the same namespace
+helm install kubeuser ./helm/kubeuser --create-namespace -n kubeuser
+```
+
+This creates:
+- Controller deployment in `kubeuser` namespace
+- User secrets and kubeconfigs in `kubeuser` namespace
+- All resources in one place for easy management
+
+**Alternative Setup (Advanced):**
+If you need user resources in a different namespace, you can override the environment variable:
+
+```yaml
+# values.yaml
+env:
+  KUBEUSER_NAMESPACE: "custom-namespace"
+```
+
+**Note:** Ensure the target namespace exists before deploying:
+```bash
+kubectl create namespace custom-namespace
+helm install kubeuser ./helm/kubeuser -n kubeuser
+```
+
+### Configuration Parameters
+
 The following table lists the configurable parameters and their default values:
 
 | Parameter | Description | Default |
@@ -61,6 +95,10 @@ The following table lists the configurable parameters and their default values:
 | `metrics.service.port` | Metrics service port | `8080` |
 | `rbac.create` | Create RBAC resources | `true` |
 | `crds.install` | Install CustomResourceDefinitions | `true` |
+| `env.KUBERNETES_API_SERVER` | Kubernetes API server endpoint | `https://kubernetes.default.svc` |
+| `env.CLUSTER_DOMAIN` | Kubernetes cluster domain | `cluster.local` |
+| `env.KUBEUSER_MIN_DURATION` | Minimum certificate duration (optional) | `10m` |
+| `env.KUBEUSER_ROTATION_THRESHOLD` | Certificate rotation threshold (optional) | `25% of TTL` |
 | `commonLabels.environment` | Common environment label | `test` |
 
 ## Usage Examples

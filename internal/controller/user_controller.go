@@ -21,6 +21,7 @@ import (
 	"github.com/openkube-hub/KubeUser/internal/controller/renewal"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -202,18 +203,48 @@ func (r *UserReconciler) ensureInitialStatus(user *authv1alpha1.User) bool {
 }
 
 // handleDeletion manages the user deletion process including cleanup and finalizer removal.
+// This function gracefully handles etcd race conditions that occur during concurrent deletion reconciliations.
 func (r *UserReconciler) handleDeletion(ctx context.Context, user *authv1alpha1.User) (ctrl.Result, error) {
 	logger := logf.FromContext(ctx)
 	logger.Info("User is being deleted, starting cleanup")
 
 	if helpers.ContainsString(user.Finalizers, cleanup.UserFinalizer) {
+		// Step 1: Clean up all user resources BEFORE removing finalizer
+		// This ensures cleanup is complete even if finalizer removal fails
 		logger.Info("Cleaning up user resources")
 		cleanup.CleanupUserResources(ctx, r.Client, user)
 
+		// Step 2: Remove finalizer as the absolute last step
 		logger.Info("Removing finalizer")
 		user.Finalizers = helpers.RemoveString(user.Finalizers, cleanup.UserFinalizer)
 		if err := r.Update(ctx, user); err != nil {
-			logger.Error(err, "Failed to remove finalizer")
+			// Handle harmless race conditions that occur during concurrent deletion reconciliations
+			// These are expected and should not trigger error alerts in observability systems
+
+			// Case 1: Object already deleted by another reconciliation
+			if client.IgnoreNotFound(err) == nil {
+				logger.Info("Ignoring harmless race condition: user already deleted, finalizer removal not needed")
+				return ctrl.Result{}, nil
+			}
+
+			// Case 2: Optimistic concurrency conflict (ResourceVersion mismatch)
+			if apierrors.IsConflict(err) {
+				logger.Info("Ignoring harmless race condition: conflict removing finalizer, likely already removed by another reconciliation")
+				return ctrl.Result{}, nil
+			}
+
+			// Case 3: etcd precondition failures (UID mismatch during deletion)
+			// These occur when the object is being deleted and etcd's preconditions fail
+			errMsg := err.Error()
+			if strings.Contains(errMsg, "Precondition failed") || strings.Contains(errMsg, "StorageError") {
+				logger.Info("Ignoring harmless race condition: etcd precondition failed during deletion",
+					"error", errMsg,
+					"reason", "Object is being deleted concurrently")
+				return ctrl.Result{}, nil
+			}
+
+			// Only log actual errors that need attention
+			logger.Error(err, "Failed to remove finalizer - unexpected error")
 			return ctrl.Result{}, err
 		}
 		logger.Info("Successfully cleaned up and removed finalizer")
