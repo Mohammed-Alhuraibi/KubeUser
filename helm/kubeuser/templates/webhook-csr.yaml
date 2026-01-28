@@ -1,5 +1,38 @@
 {{- if .Values.webhook.enabled }}
 ---
+# MutatingWebhookConfiguration with cert-manager CA injection
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: {{ include "kubeuser.fullname" . }}-mutating-webhook-configuration
+  labels:
+    {{- include "kubeuser.labels" . | nindent 4 }}
+  annotations:
+    # cert-manager will inject the CA bundle automatically
+    cert-manager.io/inject-ca-from: {{ .Release.Namespace }}/{{ include "kubeuser.fullname" . }}-webhook-cert
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: {{ include "kubeuser.fullname" . }}-webhook-service
+      namespace: {{ .Release.Namespace }}
+      path: /mutate-auth-openkube-io-v1alpha1-user
+    # caBundle will be injected automatically by cert-manager
+  failurePolicy: {{ .Values.webhook.failurePolicy | default "Fail" }}
+  name: muser.auth.openkube.io
+  rules:
+  - apiGroups:
+    - auth.openkube.io
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - users
+  sideEffects: None
+---
 # ValidatingWebhookConfiguration with cert-manager CA injection
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration
@@ -20,7 +53,7 @@ webhooks:
       path: /validate-auth-openkube-io-v1alpha1-user
     # caBundle will be injected automatically by cert-manager
   failurePolicy: {{ .Values.webhook.failurePolicy | default "Fail" }}
-  name: user.auth.openkube.io
+  name: vuser.auth.openkube.io
   rules:
   - apiGroups:
     - auth.openkube.io

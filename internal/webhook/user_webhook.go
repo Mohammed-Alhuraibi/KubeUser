@@ -9,7 +9,6 @@ package webhook
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"time"
 
 	authv1alpha1 "github.com/openkube-hub/KubeUser/api/v1alpha1"
@@ -25,44 +24,129 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
-// UserWebhook validates User resources before they are persisted to etcd
+// UserWebhook validates and mutates User resources before they are persisted to etcd
 type UserWebhook struct {
 	client.Client
-	decoder admission.Decoder
 }
 
-// +kubebuilder:webhook:path=/validate-auth-openkube-io-v1alpha1-user,mutating=false,failurePolicy=fail,sideEffects=None,groups=auth.openkube.io,resources=users,verbs=create;update,versions=v1alpha1,name=user.auth.openkube.io,admissionReviewVersions=v1
+// +kubebuilder:webhook:path=/mutate-auth-openkube-io-v1alpha1-user,mutating=true,failurePolicy=fail,sideEffects=None,groups=auth.openkube.io,resources=users,verbs=create;update,versions=v1alpha1,name=muser.auth.openkube.io,admissionReviewVersions=v1
+// +kubebuilder:webhook:path=/validate-auth-openkube-io-v1alpha1-user,mutating=false,failurePolicy=fail,sideEffects=None,groups=auth.openkube.io,resources=users,verbs=create;update,versions=v1alpha1,name=vuser.auth.openkube.io,admissionReviewVersions=v1
 
-func (w *UserWebhook) Handle(ctx context.Context, req admission.Request) admission.Response {
-	logger := logf.FromContext(ctx).WithName("user-webhook")
-	logger.Info("Validating User resource", "name", req.Name, "namespace", req.Namespace, "operation", req.Operation)
+// SetupWithManager registers the webhook with the manager
+func (w *UserWebhook) SetupWithManager(mgr ctrl.Manager) error {
+	w.Client = mgr.GetClient()
 
-	user := &authv1alpha1.User{}
-	if err := w.decoder.Decode(req, user); err != nil {
-		logger.Error(err, "Failed to decode User resource")
-		return admission.Errored(http.StatusBadRequest, fmt.Errorf("failed to decode User: %w", err))
+	return ctrl.NewWebhookManagedBy(mgr).
+		For(&authv1alpha1.User{}).
+		WithDefaulter(w).
+		WithValidator(w).
+		Complete()
+}
+
+// Compile-time checks to ensure UserWebhook implements required interfaces
+var _ webhook.CustomDefaulter = &UserWebhook{}
+var _ webhook.CustomValidator = &UserWebhook{}
+
+// Default implements webhook.CustomDefaulter
+// This method is called by the mutating webhook to set default values before validation
+// Uses auth.GetSafeAuthSpec as the single source of truth for defaults
+func (w *UserWebhook) Default(ctx context.Context, obj runtime.Object) error {
+	user, ok := obj.(*authv1alpha1.User)
+	if !ok {
+		return fmt.Errorf("expected User object, got %T", obj)
 	}
+
+	logger := logf.FromContext(ctx).WithName("user-webhook-default")
+	logger.Info("Setting defaults for User", "user", user.Name)
+
+	// Don't initialize Auth if it's missing - our mandatory policy requires it to be provided
+	if user.Spec.Auth == nil {
+		logger.Info("Auth section is nil, skipping defaults (will be rejected by validation)", "user", user.Name)
+		return nil
+	}
+
+	// Set default TTL if not specified
+	if user.Spec.Auth.TTL == "" {
+		user.Spec.Auth.TTL = auth.DefaultTTL
+		logger.Info("Set default TTL", "user", user.Name, "ttl", auth.DefaultTTL)
+	}
+
+	// Set default AutoRenew if not specified
+	if user.Spec.Auth.AutoRenew == nil {
+		trueVal := true
+		user.Spec.Auth.AutoRenew = &trueVal
+		logger.Info("Set default AutoRenew", "user", user.Name, "autoRenew", true)
+	}
+
+	return nil
+}
+
+// ValidateCreate implements admission.CustomValidator
+func (w *UserWebhook) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+	user, ok := obj.(*authv1alpha1.User)
+	if !ok {
+		return nil, fmt.Errorf("expected User object, got %T", obj)
+	}
+
+	logger := logf.FromContext(ctx).WithName("user-webhook-create")
+	logger.Info("Validating User creation", "user", user.Name)
 
 	// Validate Role references
 	if err := w.validateRoles(ctx, user.Spec.Roles); err != nil {
-		logger.Error(err, "Role validation failed", "user", user.Name)
-		return admission.Denied(err.Error())
+		return nil, err
 	}
 
 	// Validate ClusterRole references
 	if err := w.validateClusterRoles(ctx, user.Spec.ClusterRoles); err != nil {
-		logger.Error(err, "ClusterRole validation failed", "user", user.Name)
-		return admission.Denied(err.Error())
+		return nil, err
 	}
 
 	// Validate Auth specification
 	if err := w.validateAuthSpec(user); err != nil {
-		logger.Error(err, "Auth specification validation failed", "user", user.Name)
-		return admission.Denied(err.Error())
+		return nil, err
 	}
 
-	logger.Info("User resource validation successful", "user", user.Name)
-	return admission.Allowed("User resource validation successful")
+	return nil, nil
+}
+
+// ValidateUpdate implements admission.CustomValidator
+func (w *UserWebhook) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
+	newUser, ok := newObj.(*authv1alpha1.User)
+	if !ok {
+		return nil, fmt.Errorf("expected User object, got %T", newObj)
+	}
+
+	logger := logf.FromContext(ctx).WithName("user-webhook-update")
+	logger.Info("Validating User update", "user", newUser.Name)
+
+	// Skip validation if the user is being deleted
+	if newUser.DeletionTimestamp != nil {
+		logger.Info("Skipping validation for User being deleted", "user", newUser.Name)
+		return nil, nil
+	}
+
+	// Validate Role references in the updated spec
+	if err := w.validateRoles(ctx, newUser.Spec.Roles); err != nil {
+		return nil, err
+	}
+
+	// Validate ClusterRole references in the updated spec
+	if err := w.validateClusterRoles(ctx, newUser.Spec.ClusterRoles); err != nil {
+		return nil, err
+	}
+
+	// Validate Auth specification in the updated spec
+	if err := w.validateAuthSpec(newUser); err != nil {
+		return nil, err
+	}
+
+	return nil, nil
+}
+
+// ValidateDelete implements admission.CustomValidator
+func (w *UserWebhook) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+	// No validation needed for delete operations
+	return nil, nil
 }
 
 // validateRoles checks that all referenced Roles or ClusterRoles exist in their respective namespaces
@@ -134,95 +218,18 @@ func (w *UserWebhook) validateClusterRoles(ctx context.Context, clusterRoles []a
 	return nil
 }
 
-// SetupWithManager registers the webhook with the manager
-func (w *UserWebhook) SetupWithManager(mgr ctrl.Manager) error {
-	w.Client = mgr.GetClient()
-	w.decoder = admission.NewDecoder(mgr.GetScheme())
-
-	return ctrl.NewWebhookManagedBy(mgr).
-		For(&authv1alpha1.User{}).
-		WithValidator(w).
-		Complete()
-}
-
-// Compile-time check to ensure UserWebhook implements admission.CustomValidator
-var _ webhook.CustomValidator = &UserWebhook{}
-
-// ValidateCreate implements admission.CustomValidator
-func (w *UserWebhook) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
-	user, ok := obj.(*authv1alpha1.User)
-	if !ok {
-		return nil, fmt.Errorf("expected User object, got %T", obj)
-	}
-
-	logger := logf.FromContext(ctx).WithName("user-webhook-create")
-	logger.Info("Validating User creation", "user", user.Name)
-
-	// Validate Role references
-	if err := w.validateRoles(ctx, user.Spec.Roles); err != nil {
-		return nil, err
-	}
-
-	// Validate ClusterRole references
-	if err := w.validateClusterRoles(ctx, user.Spec.ClusterRoles); err != nil {
-		return nil, err
-	}
-
-	// Validate Auth specification
-	if err := w.validateAuthSpec(user); err != nil {
-		return nil, err
-	}
-
-	return nil, nil
-}
-
-// ValidateUpdate implements admission.CustomValidator
-func (w *UserWebhook) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
-	newUser, ok := newObj.(*authv1alpha1.User)
-	if !ok {
-		return nil, fmt.Errorf("expected User object, got %T", newObj)
-	}
-
-	logger := logf.FromContext(ctx).WithName("user-webhook-update")
-	logger.Info("Validating User update", "user", newUser.Name)
-
-	// Skip validation if the user is being deleted
-	if newUser.DeletionTimestamp != nil {
-		logger.Info("Skipping validation for User being deleted", "user", newUser.Name)
-		return nil, nil
-	}
-
-	// Validate Role references in the updated spec
-	if err := w.validateRoles(ctx, newUser.Spec.Roles); err != nil {
-		return nil, err
-	}
-
-	// Validate ClusterRole references in the updated spec
-	if err := w.validateClusterRoles(ctx, newUser.Spec.ClusterRoles); err != nil {
-		return nil, err
-	}
-
-	// Validate Auth specification in the updated spec
-	if err := w.validateAuthSpec(newUser); err != nil {
-		return nil, err
-	}
-
-	return nil, nil
-}
-
-// ValidateDelete implements admission.CustomValidator
-func (w *UserWebhook) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
-	// No validation needed for delete operations
-	return nil, nil
-}
-
 // validateAuthSpec validates the auth specification using the auth package validation
 // WEBHOOK MODE: Strictly rejects dangerous configurations (Fail-Fast architecture)
 // MANDATORY IDENTITY: Enforces explicit authentication type specification
 func (w *UserWebhook) validateAuthSpec(user *authv1alpha1.User) error {
-	// MANDATORY IDENTITY ENFORCEMENT: Reject if auth type is not specified
-	if user.Spec.Auth.Type == "" {
-		return fmt.Errorf("authentication section is mandatory. Please specify spec.auth.type (e.g., x509)")
+	// STAGE 1: Reject if auth section is missing entirely
+	if user.Spec.Auth == nil {
+		return fmt.Errorf("the auth section is mandatory. Please provide spec.auth.type")
+	}
+
+	// STAGE 2: Reject if auth type is not specified (nil pointer check)
+	if user.Spec.Auth.Type == nil || *user.Spec.Auth.Type == "" {
+		return fmt.Errorf("spec.auth.type is mandatory (e.g., x509)")
 	}
 
 	// Use the existing auth package validation (enforces 24h minimum TTL)
@@ -230,12 +237,15 @@ func (w *UserWebhook) validateAuthSpec(user *authv1alpha1.User) error {
 		return fmt.Errorf("invalid auth specification: %w", err)
 	}
 
+	// Get safe auth spec with defaults applied (single source of truth)
+	safeAuth := auth.GetSafeAuthSpec(user)
+
 	// PRODUCTION HARDENING: Strict webhook validation for renewal configuration
-	if user.Spec.Auth.AutoRenew {
+	if safeAuth.AutoRenew != nil && *safeAuth.AutoRenew {
 		// Parse certificate duration
 		var certDuration time.Duration
-		if user.Spec.Auth.TTL != "" {
-			d, err := time.ParseDuration(user.Spec.Auth.TTL)
+		if safeAuth.TTL != "" {
+			d, err := time.ParseDuration(safeAuth.TTL)
 			if err != nil {
 				return fmt.Errorf("invalid TTL format: %v", err)
 			}
@@ -245,8 +255,8 @@ func (w *UserWebhook) validateAuthSpec(user *authv1alpha1.User) error {
 		}
 
 		// Validate renewBefore if specified
-		if user.Spec.Auth.RenewBefore != nil {
-			renewBefore := user.Spec.Auth.RenewBefore.Duration
+		if safeAuth.RenewBefore != nil {
+			renewBefore := safeAuth.RenewBefore.Duration
 
 			if renewBefore <= 0 {
 				return fmt.Errorf("renewBefore must be positive, got: %v", renewBefore)

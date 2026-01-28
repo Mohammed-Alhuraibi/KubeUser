@@ -7,6 +7,7 @@ import (
 	"time"
 
 	authv1alpha1 "github.com/openkube-hub/KubeUser/api/v1alpha1"
+	"github.com/openkube-hub/KubeUser/internal/controller/helpers"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -16,6 +17,11 @@ import (
 const (
 	AuthTypeX509 = "x509"
 	AuthTypeOIDC = "oidc"
+)
+
+// Default values for authentication configuration
+const (
+	DefaultTTL = "2160h" // 90 days
 )
 
 // Provider defines the interface for authentication providers
@@ -81,7 +87,17 @@ func (m *Manager) Revoke(ctx context.Context, user *authv1alpha1.User) error {
 // getProvider returns the appropriate auth provider based on user spec
 // MANDATORY IDENTITY: Auth type must be explicitly specified (no defaults)
 func (m *Manager) getProvider(user *authv1alpha1.User) (Provider, error) {
-	authType := user.Spec.Auth.Type
+	// MANDATORY IDENTITY ENFORCEMENT: Auth must be non-nil
+	if user.Spec.Auth == nil {
+		return nil, fmt.Errorf("authentication section is mandatory: spec.auth must be specified")
+	}
+
+	// MANDATORY IDENTITY ENFORCEMENT: Type must be non-nil pointer
+	if user.Spec.Auth.Type == nil {
+		return nil, fmt.Errorf("authentication type is mandatory: spec.auth.type must be specified")
+	}
+
+	authType := *user.Spec.Auth.Type
 
 	// MANDATORY IDENTITY ENFORCEMENT: No defaulting - type must be explicit
 	if authType == "" {
@@ -101,20 +117,27 @@ func (m *Manager) getProvider(user *authv1alpha1.User) (Provider, error) {
 // ValidateAuthSpec validates the auth specification for the user
 // MANDATORY IDENTITY: Enforces explicit authentication type specification
 func ValidateAuthSpec(user *authv1alpha1.User) error {
-	authSpec := user.Spec.Auth
+	// MANDATORY IDENTITY ENFORCEMENT: Auth must be non-nil
+	if user.Spec.Auth == nil {
+		return fmt.Errorf("authentication section is mandatory: spec.auth must be specified")
+	}
 
-	// MANDATORY IDENTITY ENFORCEMENT: Auth type must be explicitly specified
-	if authSpec.Type == "" {
+	authSpec := *user.Spec.Auth
+
+	// MANDATORY IDENTITY ENFORCEMENT: Auth type must be explicitly specified (nil pointer check)
+	if authSpec.Type == nil || *authSpec.Type == "" {
 		return fmt.Errorf("authentication type is mandatory: spec.auth.type must be specified (e.g., 'x509' or 'oidc')")
 	}
 
+	authType := *authSpec.Type
+
 	// Validate auth type is supported
-	if authSpec.Type != AuthTypeX509 && authSpec.Type != AuthTypeOIDC {
-		return fmt.Errorf("unsupported auth type: %s, must be '%s' or '%s'", authSpec.Type, AuthTypeX509, AuthTypeOIDC)
+	if authType != AuthTypeX509 && authType != AuthTypeOIDC {
+		return fmt.Errorf("unsupported auth type: %s, must be '%s' or '%s'", authType, AuthTypeX509, AuthTypeOIDC)
 	}
 
 	// Validate TTL for x509
-	if authSpec.Type == AuthTypeX509 {
+	if authType == AuthTypeX509 {
 		if authSpec.TTL != "" {
 			duration, err := time.ParseDuration(authSpec.TTL)
 			if err != nil {
@@ -146,10 +169,15 @@ func ValidateAuthSpec(user *authv1alpha1.User) error {
 
 // GetAuthDuration returns the parsed duration from auth spec, with defaults
 func GetAuthDuration(user *authv1alpha1.User) time.Duration {
-	authSpec := user.Spec.Auth
+	// Default duration is 90 days (2160h)
+	defaultDuration := 90 * 24 * time.Hour
 
-	// Default duration is 3 months
-	defaultDuration := 90 * 24 * time.Hour // 2160h
+	// Defensive check: if Auth is nil, return default
+	if user.Spec.Auth == nil {
+		return defaultDuration
+	}
+
+	authSpec := *user.Spec.Auth
 
 	if authSpec.TTL == "" {
 		return defaultDuration
@@ -178,7 +206,12 @@ func getMinimumDuration() time.Duration {
 
 // ValidateRenewalConfig validates the renewal configuration in the user spec
 func ValidateRenewalConfig(user *authv1alpha1.User) error {
-	if !user.Spec.Auth.AutoRenew {
+	// Defensive check: if Auth is nil, return error
+	if user.Spec.Auth == nil {
+		return fmt.Errorf("authentication section is mandatory")
+	}
+
+	if !helpers.GetAutoRenew(user) {
 		return nil // No validation needed if auto-renewal is disabled
 	}
 
@@ -214,4 +247,42 @@ func ValidateRenewalConfig(user *authv1alpha1.User) error {
 	}
 
 	return nil
+}
+
+// GetSafeAuthSpec returns a nil-safe AuthSpec with defaults applied.
+// This is the SINGLE SOURCE OF TRUTH for authentication defaults across the entire system.
+// Used by: Webhook (mutation), Controller (reconciliation), and Validation logic.
+//
+// Logic:
+// - If user.Spec.Auth is nil, returns a zero-spec (validation will handle the error)
+// - If Type is nil, returns zero-spec (invalid configuration)
+// - Applies production defaults for secondary fields:
+//   - TTL: DefaultTTL (2160h = 90 days)
+//   - AutoRenew: true
+//
+// This ensures the mutating webhook persists the exact same defaults that the controller expects.
+func GetSafeAuthSpec(user *authv1alpha1.User) authv1alpha1.AuthSpec {
+	// Return zero-spec if Auth is nil; webhook prevents this in production
+	if user.Spec.Auth == nil {
+		return authv1alpha1.AuthSpec{}
+	}
+
+	spec := *user.Spec.Auth
+
+	// Handle nil Type pointer - return zero-spec to signify invalid configuration
+	if spec.Type == nil {
+		return authv1alpha1.AuthSpec{}
+	}
+
+	// Apply defaults for secondary fields
+	if spec.TTL == "" {
+		spec.TTL = DefaultTTL
+	}
+
+	if spec.AutoRenew == nil {
+		trueVal := true
+		spec.AutoRenew = &trueVal
+	}
+
+	return spec
 }

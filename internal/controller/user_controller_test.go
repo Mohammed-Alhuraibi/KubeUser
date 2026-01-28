@@ -53,8 +53,8 @@ var _ = Describe("User Controller", func() {
 						Namespace: "default",
 					},
 					Spec: authv1alpha1.UserSpec{
-						Auth: authv1alpha1.AuthSpec{
-							Type: auth.AuthTypeX509,
+						Auth: &authv1alpha1.AuthSpec{
+							Type: &[]string{auth.AuthTypeX509}[0],
 							TTL:  "24h",
 						},
 					},

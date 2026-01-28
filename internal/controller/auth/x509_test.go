@@ -22,8 +22,8 @@ func TestX509Provider_Ensure(t *testing.T) {
 			Name: "test-user",
 		},
 		Spec: authv1alpha1.UserSpec{
-			Auth: authv1alpha1.AuthSpec{
-				Type: "x509",
+			Auth: &authv1alpha1.AuthSpec{
+				Type: stringPtr("x509"),
 				TTL:  "72h",
 			},
 		},
@@ -59,8 +59,8 @@ func TestX509Provider_Revoke(t *testing.T) {
 			Name: "test-user",
 		},
 		Spec: authv1alpha1.UserSpec{
-			Auth: authv1alpha1.AuthSpec{
-				Type: "x509",
+			Auth: &authv1alpha1.AuthSpec{
+				Type: stringPtr("x509"),
 			},
 		},
 	}

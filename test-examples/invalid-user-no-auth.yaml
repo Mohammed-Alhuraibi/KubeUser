@@ -1,0 +1,8 @@
+apiVersion: auth.openkube.io/v1alpha1
+kind: User
+metadata:
+  name: invalid-user-no-auth
+spec:
+  # Missing auth section - should be rejected by webhook
+  clusterRoles:
+    - existingClusterRole: view

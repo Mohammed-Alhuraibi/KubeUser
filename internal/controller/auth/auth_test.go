@@ -12,6 +12,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
+// Helper function to create string pointers for test cases
+func stringPtr(s string) *string {
+	return &s
+}
+
 func TestValidateAuthSpec(t *testing.T) {
 	// Save and restore environment variable
 	originalMinDuration := os.Getenv("KUBEUSER_MIN_DURATION")
@@ -40,8 +45,8 @@ func TestValidateAuthSpec(t *testing.T) {
 			name: "valid x509 auth - production safe TTL",
 			user: &authv1alpha1.User{
 				Spec: authv1alpha1.UserSpec{
-					Auth: authv1alpha1.AuthSpec{
-						Type: AuthTypeX509,
+					Auth: &authv1alpha1.AuthSpec{
+						Type: stringPtr(AuthTypeX509),
 						TTL:  "720h", // 30 days - production safe
 					},
 				},
@@ -52,9 +57,9 @@ func TestValidateAuthSpec(t *testing.T) {
 			name: "missing auth type - mandatory identity enforcement",
 			user: &authv1alpha1.User{
 				Spec: authv1alpha1.UserSpec{
-					Auth: authv1alpha1.AuthSpec{
+					Auth: &authv1alpha1.AuthSpec{
 						TTL: "720h",
-						// Type is empty - should fail with mandatory identity
+						// Type is nil - should fail with mandatory identity
 					},
 				},
 			},
@@ -64,8 +69,8 @@ func TestValidateAuthSpec(t *testing.T) {
 			name: "valid oidc auth",
 			user: &authv1alpha1.User{
 				Spec: authv1alpha1.UserSpec{
-					Auth: authv1alpha1.AuthSpec{
-						Type: AuthTypeOIDC,
+					Auth: &authv1alpha1.AuthSpec{
+						Type: stringPtr(AuthTypeOIDC),
 						TTL:  "24h", // ignored for OIDC
 					},
 				},
@@ -76,8 +81,8 @@ func TestValidateAuthSpec(t *testing.T) {
 			name: "invalid auth type",
 			user: &authv1alpha1.User{
 				Spec: authv1alpha1.UserSpec{
-					Auth: authv1alpha1.AuthSpec{
-						Type: "invalid",
+					Auth: &authv1alpha1.AuthSpec{
+						Type: stringPtr("invalid"),
 					},
 				},
 			},
@@ -87,8 +92,8 @@ func TestValidateAuthSpec(t *testing.T) {
 			name: "negative duration",
 			user: &authv1alpha1.User{
 				Spec: authv1alpha1.UserSpec{
-					Auth: authv1alpha1.AuthSpec{
-						Type: AuthTypeX509,
+					Auth: &authv1alpha1.AuthSpec{
+						Type: stringPtr(AuthTypeX509),
 						TTL:  "-1h",
 					},
 				},
@@ -99,8 +104,8 @@ func TestValidateAuthSpec(t *testing.T) {
 			name: "duration too short - production hardening enforces 24h minimum",
 			user: &authv1alpha1.User{
 				Spec: authv1alpha1.UserSpec{
-					Auth: authv1alpha1.AuthSpec{
-						Type: AuthTypeX509,
+					Auth: &authv1alpha1.AuthSpec{
+						Type: stringPtr(AuthTypeX509),
 						TTL:  "12h", // Less than 24 hours (production minimum)
 					},
 				},
@@ -111,8 +116,8 @@ func TestValidateAuthSpec(t *testing.T) {
 			name: "duration too long",
 			user: &authv1alpha1.User{
 				Spec: authv1alpha1.UserSpec{
-					Auth: authv1alpha1.AuthSpec{
-						Type: AuthTypeX509,
+					Auth: &authv1alpha1.AuthSpec{
+						Type: stringPtr(AuthTypeX509),
 						TTL:  "8761h", // More than 1 year (365*24 + 1)
 					},
 				},
@@ -141,7 +146,7 @@ func TestGetAuthDuration(t *testing.T) {
 			name: "custom duration - production safe",
 			user: &authv1alpha1.User{
 				Spec: authv1alpha1.UserSpec{
-					Auth: authv1alpha1.AuthSpec{
+					Auth: &authv1alpha1.AuthSpec{
 						TTL: "720h", // 30 days
 					},
 				},
@@ -152,7 +157,7 @@ func TestGetAuthDuration(t *testing.T) {
 			name: "default duration",
 			user: &authv1alpha1.User{
 				Spec: authv1alpha1.UserSpec{
-					Auth: authv1alpha1.AuthSpec{},
+					Auth: &authv1alpha1.AuthSpec{},
 				},
 			},
 			expected: 90 * 24 * time.Hour, // 3 months
@@ -161,7 +166,7 @@ func TestGetAuthDuration(t *testing.T) {
 			name: "invalid duration falls back to default",
 			user: &authv1alpha1.User{
 				Spec: authv1alpha1.UserSpec{
-					Auth: authv1alpha1.AuthSpec{
+					Auth: &authv1alpha1.AuthSpec{
 						TTL: "invalid",
 					},
 				},
@@ -192,8 +197,8 @@ func TestManager(t *testing.T) {
 			Name: "test-user",
 		},
 		Spec: authv1alpha1.UserSpec{
-			Auth: authv1alpha1.AuthSpec{
-				Type: AuthTypeX509,
+			Auth: &authv1alpha1.AuthSpec{
+				Type: stringPtr(AuthTypeX509),
 				TTL:  "720h", // 30 days - production safe
 			},
 		},
@@ -212,7 +217,7 @@ func TestManager(t *testing.T) {
 	}
 
 	// Test OIDC provider (should fail with not implemented)
-	user.Spec.Auth.Type = AuthTypeOIDC
+	user.Spec.Auth.Type = stringPtr(AuthTypeOIDC)
 	_, _, err = manager.Ensure(ctx, user)
 	if err == nil {
 		t.Error("OIDC ensure should fail with not implemented error")
@@ -222,14 +227,14 @@ func TestManager(t *testing.T) {
 	}
 
 	// Test invalid auth type
-	user.Spec.Auth.Type = "invalid"
+	user.Spec.Auth.Type = stringPtr("invalid")
 	_, err = manager.getProvider(user)
 	if err == nil {
 		t.Error("Should fail with unsupported auth type")
 	}
 
-	// Test missing auth type - mandatory identity enforcement
-	user.Spec.Auth.Type = ""
+	// Test missing auth type - mandatory identity enforcement (nil pointer)
+	user.Spec.Auth.Type = nil
 	_, err = manager.getProvider(user)
 	if err == nil {
 		t.Error("Should fail with mandatory auth type error")
@@ -307,8 +312,8 @@ func TestValidateAuthSpecWithCustomMinimum(t *testing.T) {
 			name: "5 minutes should be valid with custom minimum",
 			user: &authv1alpha1.User{
 				Spec: authv1alpha1.UserSpec{
-					Auth: authv1alpha1.AuthSpec{
-						Type: AuthTypeX509,
+					Auth: &authv1alpha1.AuthSpec{
+						Type: stringPtr(AuthTypeX509),
 						TTL:  "5m",
 					},
 				},
@@ -319,8 +324,8 @@ func TestValidateAuthSpecWithCustomMinimum(t *testing.T) {
 			name: "1 minute should be invalid even with custom minimum",
 			user: &authv1alpha1.User{
 				Spec: authv1alpha1.UserSpec{
-					Auth: authv1alpha1.AuthSpec{
-						Type: AuthTypeX509,
+					Auth: &authv1alpha1.AuthSpec{
+						Type: stringPtr(AuthTypeX509),
 						TTL:  "1m",
 					},
 				},

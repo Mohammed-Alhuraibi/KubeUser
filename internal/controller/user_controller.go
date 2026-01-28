@@ -379,13 +379,18 @@ func (r *UserReconciler) syncStatusFields(ctx context.Context, user *authv1alpha
 	logger := logf.FromContext(ctx)
 	changed := false
 
+	// Defensive check: if Auth is nil, cannot sync status fields
+	if user.Spec.Auth == nil {
+		return false
+	}
+
 	// Handle NextRenewalAt field based on autoRenew setting
 	// Explicit purging: if autoRenew is disabled, explicitly set NextRenewalAt to nil
-	if !user.Spec.Auth.AutoRenew && user.Status.NextRenewalAt != nil {
+	if !helpers.GetAutoRenew(user) && user.Status.NextRenewalAt != nil {
 		logger.Info("Auto-renewal disabled, explicitly clearing NextRenewalAt field")
 		user.Status.NextRenewalAt = nil
 		changed = true
-	} else if user.Spec.Auth.AutoRenew && user.Status.ExpiryTime != "" {
+	} else if helpers.GetAutoRenew(user) && user.Status.ExpiryTime != "" {
 		// Auto-renewal is enabled - check if NextRenewalAt needs recalculation
 		certExpiry, err := time.Parse(time.RFC3339, user.Status.ExpiryTime)
 		if err != nil {
@@ -447,8 +452,14 @@ func (r *UserReconciler) calculateRequeue(ctx context.Context, user *authv1alpha
 		return ctrl.Result{}
 	}
 
+	// Defensive check: if Auth is nil, use default requeue
+	if user.Spec.Auth == nil {
+		logger.Info("Auth is nil, using default requeue")
+		return ctrl.Result{RequeueAfter: 30 * time.Minute}
+	}
+
 	// Smart requeue for auto-renewal enabled users
-	if user.Spec.Auth.AutoRenew && user.Status.Phase == helpers.PhaseActive {
+	if helpers.GetAutoRenew(user) && user.Status.Phase == helpers.PhaseActive {
 		requeueAfter, err := r.calculateSmartRequeue(ctx, user)
 		if err != nil {
 			logger.Error(err, "Failed to calculate smart requeue, using default")
@@ -488,6 +499,12 @@ func (r *UserReconciler) calculateRequeue(ctx context.Context, user *authv1alpha
 // It uses NextRenewalAt from status when available for efficiency, with jitter to prevent thundering herd.
 func (r *UserReconciler) calculateSmartRequeue(ctx context.Context, user *authv1alpha1.User) (time.Duration, error) {
 	logger := logf.FromContext(ctx)
+
+	// Defensive check: if Auth is nil, use default
+	if user.Spec.Auth == nil {
+		logger.Info("Auth is nil, using default requeue")
+		return 30 * time.Minute, nil
+	}
 
 	// Initialize renewal calculator if not already done
 	if r.RenewalCalculator == nil {

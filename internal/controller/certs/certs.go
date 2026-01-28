@@ -222,7 +222,8 @@ func EnsureCertKubeconfigWithDuration(ctx context.Context, r client.Client, user
 
 	// Only set NextRenewalAt if auto-renewal is enabled
 	var newNextRenewalAt *metav1.Time
-	if user.Spec.Auth.AutoRenew {
+	autoRenew := user.Spec.Auth.AutoRenew != nil && *user.Spec.Auth.AutoRenew
+	if autoRenew {
 		nextRenewal := calculateNextRenewal(issuedAt, certExpiryTime, user.Spec.Auth.RenewBefore)
 		newNextRenewalAt = &nextRenewal
 

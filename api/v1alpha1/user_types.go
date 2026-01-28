@@ -37,20 +37,18 @@ type AuthSpec struct {
 	// Type specifies the authentication method (MANDATORY)
 	// +kubebuilder:validation:Enum=x509;oidc
 	// +kubebuilder:validation:Required
-	Type string `json:"type"`
+	Type *string `json:"type"`
 
 	// TTL specifies credential time-to-live (lifetime)
-	// For x509: certificate validity period (default: 3 months)
+	// For x509: certificate validity period (default: 2160h = 90 days)
 	// For oidc: ignored (placeholder for future implementation)
 	// +optional
 	// +kubebuilder:validation:Pattern=^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
-	// +kubebuilder:default="2160h"
 	TTL string `json:"ttl,omitempty"`
 
-	// AutoRenew enables automatic certificate renewal
+	// AutoRenew enables automatic certificate renewal (default: true)
 	// +optional
-	// +kubebuilder:default=false
-	AutoRenew bool `json:"autoRenew,omitempty"`
+	AutoRenew *bool `json:"autoRenew,omitempty"`
 
 	// RenewBefore specifies when to renew before expiry
 	// Overrides the default 33% rule. Must be less than TTL.
@@ -63,7 +61,7 @@ type AuthSpec struct {
 type UserSpec struct {
 	// Auth defines authentication configuration (MANDATORY)
 	// +kubebuilder:validation:Required
-	Auth AuthSpec `json:"auth"`
+	Auth *AuthSpec `json:"auth"`
 
 	// Roles is a list of namespace-scoped Role bindings
 	// +optional

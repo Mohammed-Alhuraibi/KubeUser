@@ -69,8 +69,8 @@ spec:
                 description: Auth defines authentication configuration (MANDATORY)
                 properties:
                   autoRenew:
-                    default: false
-                    description: AutoRenew enables automatic certificate renewal
+                    description: 'AutoRenew enables automatic certificate renewal
+                      (default: true)'
                     type: boolean
                   renewBefore:
                     description: |-
@@ -79,10 +79,9 @@ spec:
                       Examples: "5m", "30d", "720h"
                     type: string
                   ttl:
-                    default: 2160h
                     description: |-
                       TTL specifies credential time-to-live (lifetime)
-                      For x509: certificate validity period (default: 3 months)
+                      For x509: certificate validity period (default: 2160h = 90 days)
                       For oidc: ignored (placeholder for future implementation)
                     pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                     type: string

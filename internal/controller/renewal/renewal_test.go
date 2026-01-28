@@ -8,6 +8,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// Helper function for tests
+func boolPtr(b bool) *bool {
+	return &b
+}
+
 func TestRenewalCalculator_Basic(t *testing.T) {
 	rc := NewRenewalCalculator()
 	now := time.Now()
@@ -15,8 +20,8 @@ func TestRenewalCalculator_Basic(t *testing.T) {
 	// Test basic 33% rule
 	user := &authv1alpha1.User{
 		Spec: authv1alpha1.UserSpec{
-			Auth: authv1alpha1.AuthSpec{
-				AutoRenew: true,
+			Auth: &authv1alpha1.AuthSpec{
+				AutoRenew: boolPtr(true),
 			},
 		},
 	}
@@ -46,8 +51,8 @@ func TestRenewalCalculator_CustomRenewBefore(t *testing.T) {
 
 	user := &authv1alpha1.User{
 		Spec: authv1alpha1.UserSpec{
-			Auth: authv1alpha1.AuthSpec{
-				AutoRenew:   true,
+			Auth: &authv1alpha1.AuthSpec{
+				AutoRenew:   boolPtr(true),
 				RenewBefore: &metav1.Duration{Duration: 2 * time.Hour},
 			},
 		},
@@ -75,8 +80,8 @@ func TestRenewalCalculator_ShouldRenewNow_Basic(t *testing.T) {
 	// Certificate that should renew (past renewal time)
 	user := &authv1alpha1.User{
 		Spec: authv1alpha1.UserSpec{
-			Auth: authv1alpha1.AuthSpec{
-				AutoRenew:   true,
+			Auth: &authv1alpha1.AuthSpec{
+				AutoRenew:   boolPtr(true),
 				RenewBefore: &metav1.Duration{Duration: 2 * time.Hour},
 			},
 		},
@@ -139,8 +144,8 @@ func TestValidateRenewalConfig_Basic(t *testing.T) {
 			name: "auto-renewal disabled",
 			user: &authv1alpha1.User{
 				Spec: authv1alpha1.UserSpec{
-					Auth: authv1alpha1.AuthSpec{
-						AutoRenew: false,
+					Auth: &authv1alpha1.AuthSpec{
+						AutoRenew: boolPtr(false),
 					},
 				},
 			},
@@ -150,8 +155,8 @@ func TestValidateRenewalConfig_Basic(t *testing.T) {
 			name: "valid config",
 			user: &authv1alpha1.User{
 				Spec: authv1alpha1.UserSpec{
-					Auth: authv1alpha1.AuthSpec{
-						AutoRenew:   true,
+					Auth: &authv1alpha1.AuthSpec{
+						AutoRenew:   boolPtr(true),
 						TTL:         "24h",
 						RenewBefore: &metav1.Duration{Duration: 6 * time.Hour},
 					},
@@ -163,8 +168,8 @@ func TestValidateRenewalConfig_Basic(t *testing.T) {
 			name: "negative renewBefore",
 			user: &authv1alpha1.User{
 				Spec: authv1alpha1.UserSpec{
-					Auth: authv1alpha1.AuthSpec{
-						AutoRenew:   true,
+					Auth: &authv1alpha1.AuthSpec{
+						AutoRenew:   boolPtr(true),
 						TTL:         "24h",
 						RenewBefore: &metav1.Duration{Duration: -1 * time.Hour},
 					},

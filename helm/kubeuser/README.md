@@ -113,6 +113,10 @@ kind: User
 metadata:
   name: alice
 spec:
+  auth:
+    type: x509  # Required: must be 'x509' or 'oidc'
+    ttl: "2160h"  # Optional: defaults to 2160h (90 days)
+    autoRenew: true  # Optional: defaults to true
   roles:
     # Bind a namespace-scoped Role
     - namespace: "development"
@@ -131,6 +135,10 @@ kind: User
 metadata:
   name: bob
 spec:
+  auth:
+    type: x509
+    ttl: "2160h"
+    autoRenew: true
   roles:
     # Bind ClusterRole 'view' with RoleBinding in specific namespaces
     - namespace: "team-a"
@@ -147,6 +155,10 @@ kind: User
 metadata:
   name: charlie-admin
 spec:
+  auth:
+    type: x509
+    ttl: "2160h"
+    autoRenew: true
   clusterRoles:
     # Bind ClusterRole with ClusterRoleBinding for cluster-wide access
     - existingClusterRole: "cluster-admin"
@@ -162,6 +174,10 @@ kind: User
 metadata:
   name: dave
 spec:
+  auth:
+    type: x509
+    ttl: "2160h"
+    autoRenew: true
   roles:
     # Namespace-scoped Role
     - namespace: "production"

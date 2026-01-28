@@ -1,0 +1,11 @@
+apiVersion: auth.openkube.io/v1alpha1
+kind: User
+metadata:
+  name: invalid-user-no-type
+spec:
+  # Auth section present but missing type - should be rejected by webhook
+  auth:
+    ttl: "2160h"
+    autoRenew: true
+  clusterRoles:
+    - existingClusterRole: view

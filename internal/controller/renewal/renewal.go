@@ -12,6 +12,7 @@ import (
 	"time"
 
 	authv1alpha1 "github.com/openkube-hub/KubeUser/api/v1alpha1"
+	"github.com/openkube-hub/KubeUser/internal/controller/helpers"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -49,6 +50,11 @@ func (rc *RenewalCalculator) CalculateRenewalTime(user *authv1alpha1.User, certE
 
 	if certDuration <= 0 || certExpiry.IsZero() {
 		return time.Time{}, fmt.Errorf("invalid duration or expiry")
+	}
+
+	// Defensive check: Auth must be non-nil
+	if user.Spec.Auth == nil {
+		return time.Time{}, fmt.Errorf("authentication section is mandatory")
 	}
 
 	// Step 1: Prioritize custom renewBefore
@@ -142,6 +148,11 @@ func (rc *RenewalCalculator) GetRequeueAfter(user *authv1alpha1.User, certExpiry
 
 // UpdateUserRenewalStatus updates the user status with renewal information
 func (rc *RenewalCalculator) UpdateUserRenewalStatus(user *authv1alpha1.User, certExpiry time.Time, certDuration time.Duration) error {
+	// Defensive check: Auth must be non-nil
+	if user.Spec.Auth == nil {
+		return fmt.Errorf("authentication section is mandatory")
+	}
+
 	renewalTime, err := rc.CalculateRenewalTime(user, certExpiry, certDuration)
 	if err != nil {
 		return err
@@ -151,7 +162,7 @@ func (rc *RenewalCalculator) UpdateUserRenewalStatus(user *authv1alpha1.User, ce
 	user.Status.ExpiryTime = certExpiry.Format(time.RFC3339)
 
 	// Only set NextRenewalAt if auto-renewal is enabled
-	if user.Spec.Auth.AutoRenew {
+	if helpers.GetAutoRenew(user) {
 		user.Status.NextRenewalAt = &metav1.Time{Time: renewalTime}
 	} else {
 		// Explicitly clear the field if auto-renewal is disabled
@@ -165,7 +176,12 @@ func (rc *RenewalCalculator) UpdateUserRenewalStatus(user *authv1alpha1.User, ce
 // Controller mode: Auto-corrects dangerous values and logs warnings
 // Webhook mode: Should reject dangerous configurations (handled in webhook layer)
 func ValidateRenewalConfig(user *authv1alpha1.User) error {
-	if !user.Spec.Auth.AutoRenew {
+	// Defensive check: Auth must be non-nil
+	if user.Spec.Auth == nil {
+		return fmt.Errorf("authentication section is mandatory")
+	}
+
+	if !helpers.GetAutoRenew(user) {
 		return nil
 	}
 

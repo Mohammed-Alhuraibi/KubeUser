@@ -31,6 +31,17 @@ const (
 	PhaseRenewing = "Renewing"
 )
 
+// GetAutoRenew returns the autoRenew value with default of true if not specified
+func GetAutoRenew(user *authv1alpha1.User) bool {
+	if user.Spec.Auth == nil {
+		return true // Default to true
+	}
+	if user.Spec.Auth.AutoRenew == nil {
+		return true // Default to true
+	}
+	return *user.Spec.Auth.AutoRenew
+}
+
 // GetKubeUserNamespace returns the namespace where all KubeUser resources should be created
 func GetKubeUserNamespace() string {
 	namespace := os.Getenv("KUBEUSER_NAMESPACE")

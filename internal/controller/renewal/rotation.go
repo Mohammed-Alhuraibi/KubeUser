@@ -675,6 +675,11 @@ func (rm *RotationManager) atomicSecretUpdate(ctx context.Context, user *authv1a
 // Returns (bool, error) where bool indicates if any status fields were changed.
 // This is a pure in-memory mutator that performs no API writes.
 func (rm *RotationManager) updateUserStatusAfterRotation(user *authv1alpha1.User, signedCert []byte, _ time.Duration) (bool, error) {
+	// Defensive check: Auth must be non-nil
+	if user.Spec.Auth == nil {
+		return false, fmt.Errorf("authentication section is mandatory")
+	}
+
 	certExpiry, err := rm.extractCertificateExpiry(signedCert)
 	if err != nil {
 		return false, err
@@ -692,7 +697,7 @@ func (rm *RotationManager) updateUserStatusAfterRotation(user *authv1alpha1.User
 
 	// 2. Conditional Renewal Logic
 	var newNextRenewalAt *metav1.Time
-	if user.Spec.Auth.AutoRenew {
+	if helpers.GetAutoRenew(user) {
 		// Calculate when the next rotation would trigger
 		renewalTime := CalculateNextRenewal(time.Now(), certExpiry, user.Spec.Auth.RenewBefore)
 		newNextRenewalAt = &renewalTime

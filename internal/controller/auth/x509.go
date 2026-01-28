@@ -7,6 +7,7 @@ import (
 
 	authv1alpha1 "github.com/openkube-hub/KubeUser/api/v1alpha1"
 	"github.com/openkube-hub/KubeUser/internal/controller/certs"
+	"github.com/openkube-hub/KubeUser/internal/controller/helpers"
 	"github.com/openkube-hub/KubeUser/internal/controller/renewal"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -39,7 +40,13 @@ func NewX509Provider(c client.Client, eventRecorder record.EventRecorder) *X509P
 // The caller (main controller orchestrator) is responsible for persisting status changes to etcd.
 func (p *X509Provider) Ensure(ctx context.Context, user *authv1alpha1.User) (bool, *ctrl.Result, error) {
 	logger := logf.FromContext(ctx)
-	logger.Info("Ensuring x509 authentication", "user", user.Name, "autoRenew", user.Spec.Auth.AutoRenew)
+
+	// Defensive check: Auth must be non-nil
+	if user.Spec.Auth == nil {
+		return false, nil, fmt.Errorf("authentication section is mandatory")
+	}
+
+	logger.Info("Ensuring x509 authentication", "user", user.Name, "autoRenew", helpers.GetAutoRenew(user))
 
 	// Validate auth spec
 	if err := ValidateAuthSpec(user); err != nil {
@@ -81,7 +88,7 @@ func (p *X509Provider) Ensure(ctx context.Context, user *authv1alpha1.User) (boo
 	}
 
 	// Check if auto-renewal is enabled and certificate needs renewal
-	if user.Spec.Auth.AutoRenew {
+	if helpers.GetAutoRenew(user) {
 		needsRenewal, err := p.checkIfRenewalNeeded(ctx, user, duration)
 		if err != nil {
 			logger.Error(err, "Failed to check renewal status")
@@ -207,6 +214,11 @@ func (p *X509Provider) estimateTTLChange(ctx context.Context, user *authv1alpha1
 	logger := logf.FromContext(ctx)
 
 	var estimatedOriginalTTL time.Duration
+
+	// Defensive check: Auth must be non-nil
+	if user.Spec.Auth == nil {
+		return false, fmt.Errorf("authentication section is mandatory")
+	}
 
 	// If we have NextRenewalAt, we can calculate more accurately
 	if user.Status.NextRenewalAt != nil && user.Spec.Auth.RenewBefore != nil {

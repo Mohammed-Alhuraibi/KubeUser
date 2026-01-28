@@ -69,11 +69,11 @@ spec:
             description: UserSpec defines the desired state of User
             properties:
               auth:
-                description: Auth defines authentication configuration
+                description: Auth defines authentication configuration (MANDATORY)
                 properties:
                   autoRenew:
-                    default: false
-                    description: AutoRenew enables automatic certificate renewal
+                    description: 'AutoRenew enables automatic certificate renewal
+                      (default: true)'
                     type: boolean
                   renewBefore:
                     description: |-
@@ -82,16 +82,14 @@ spec:
                       Examples: "5m", "30d", "720h"
                     type: string
                   ttl:
-                    default: 2160h
                     description: |-
                       TTL specifies credential time-to-live (lifetime)
-                      For x509: certificate validity period (default: 3 months)
+                      For x509: certificate validity period (default: 2160h = 90 days)
                       For oidc: ignored (placeholder for future implementation)
                     pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                     type: string
                   type:
-                    default: x509
-                    description: Type specifies the authentication method
+                    description: Type specifies the authentication method (MANDATORY)
                     enum:
                     - x509
                     - oidc
@@ -138,6 +136,8 @@ spec:
                   - namespace
                   type: object
                 type: array
+            required:
+            - auth
             type: object
           status:
             description: UserStatus defines the observed state of User
@@ -241,6 +241,11 @@ spec:
                   - timestamp
                   type: object
                 type: array
+              rotationStep:
+                description: |-
+                  RotationStep provides granular visibility into certificate rotation progress
+                  Values: GeneratingKey, CreatingCSR, WaitingForApproval, PerformingAtomicFlip, Finalizing
+                type: string
             type: object
         required:
         - spec

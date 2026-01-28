@@ -22,8 +22,8 @@ func TestOIDCProvider_Ensure(t *testing.T) {
 			Name: "test-user",
 		},
 		Spec: authv1alpha1.UserSpec{
-			Auth: authv1alpha1.AuthSpec{
-				Type: "oidc",
+			Auth: &authv1alpha1.AuthSpec{
+				Type: stringPtr("oidc"),
 				TTL:  "24h", // ignored for OIDC
 			},
 		},
@@ -55,8 +55,8 @@ func TestOIDCProvider_Revoke(t *testing.T) {
 			Name: "test-user",
 		},
 		Spec: authv1alpha1.UserSpec{
-			Auth: authv1alpha1.AuthSpec{
-				Type: "oidc",
+			Auth: &authv1alpha1.AuthSpec{
+				Type: stringPtr("oidc"),
 			},
 		},
 	}
