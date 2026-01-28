@@ -6,6 +6,12 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: user-sample
 spec:
+  # Authentication configuration (MANDATORY)
+  auth:
+    type: x509  # Required: must be 'x509' or 'oidc'
+    ttl: "2160h"  # Optional: defaults to 2160h (90 days)
+    autoRenew: true  # Optional: defaults to false
+  
   # Namespace-scoped role bindings
   roles:
     # Bind a namespace-scoped Role

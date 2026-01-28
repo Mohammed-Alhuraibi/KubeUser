@@ -34,9 +34,9 @@ type ClusterRoleSpec struct {
 
 // AuthSpec defines authentication configuration for the user
 type AuthSpec struct {
-	// Type specifies the authentication method
+	// Type specifies the authentication method (MANDATORY)
 	// +kubebuilder:validation:Enum=x509;oidc
-	// +kubebuilder:default=x509
+	// +kubebuilder:validation:Required
 	Type string `json:"type"`
 
 	// TTL specifies credential time-to-live (lifetime)
@@ -61,9 +61,9 @@ type AuthSpec struct {
 
 // UserSpec defines the desired state of User
 type UserSpec struct {
-	// Auth defines authentication configuration
-	// +optional
-	Auth AuthSpec `json:"auth,omitempty"`
+	// Auth defines authentication configuration (MANDATORY)
+	// +kubebuilder:validation:Required
+	Auth AuthSpec `json:"auth"`
 
 	// Roles is a list of namespace-scoped Role bindings
 	// +optional

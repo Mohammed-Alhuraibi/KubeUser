@@ -49,16 +49,16 @@ func TestValidateAuthSpec(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "empty auth type defaults to x509",
+			name: "missing auth type - mandatory identity enforcement",
 			user: &authv1alpha1.User{
 				Spec: authv1alpha1.UserSpec{
 					Auth: authv1alpha1.AuthSpec{
 						TTL: "720h",
-						// Type is empty - defaults to x509
+						// Type is empty - should fail with mandatory identity
 					},
 				},
 			},
-			wantErr: false,
+			wantErr: true,
 		},
 		{
 			name: "valid oidc auth",
@@ -226,6 +226,16 @@ func TestManager(t *testing.T) {
 	_, err = manager.getProvider(user)
 	if err == nil {
 		t.Error("Should fail with unsupported auth type")
+	}
+
+	// Test missing auth type - mandatory identity enforcement
+	user.Spec.Auth.Type = ""
+	_, err = manager.getProvider(user)
+	if err == nil {
+		t.Error("Should fail with mandatory auth type error")
+	}
+	if err != nil && err.Error() != "authentication type is mandatory: spec.auth.type must be specified" {
+		t.Errorf("Expected mandatory auth type error, got: %v", err)
 	}
 }
 func TestGetMinimumDuration(t *testing.T) {

@@ -66,7 +66,7 @@ spec:
             description: UserSpec defines the desired state of User
             properties:
               auth:
-                description: Auth defines authentication configuration
+                description: Auth defines authentication configuration (MANDATORY)
                 properties:
                   autoRenew:
                     default: false
@@ -87,8 +87,7 @@ spec:
                     pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
                     type: string
                   type:
-                    default: x509
-                    description: Type specifies the authentication method
+                    description: Type specifies the authentication method (MANDATORY)
                     enum:
                     - x509
                     - oidc
@@ -135,6 +134,8 @@ spec:
                   - namespace
                   type: object
                 type: array
+            required:
+            - auth
             type: object
           status:
             description: UserStatus defines the observed state of User
