@@ -19,9 +19,17 @@ spec:
       jsonPath: .status.phase
       name: Phase
       type: string
+    - description: Auto-renewal enabled
+      jsonPath: .spec.auth.autoRenew
+      name: AutoRenew
+      type: boolean
     - description: Certificate expiry time
       jsonPath: .status.expiryTime
       name: Expiry
+      type: string
+    - description: Next renewal time
+      jsonPath: .status.nextRenewalAt
+      name: NextRenewal
       type: string
     - description: Time since the user was created
       jsonPath: .metadata.creationTimestamp
@@ -57,6 +65,35 @@ spec:
           spec:
             description: UserSpec defines the desired state of User
             properties:
+              auth:
+                description: Auth defines authentication configuration (MANDATORY)
+                properties:
+                  autoRenew:
+                    description: 'AutoRenew enables automatic certificate renewal
+                      (default: true)'
+                    type: boolean
+                  renewBefore:
+                    description: |-
+                      RenewBefore specifies when to renew before expiry
+                      Overrides the default 33% rule. Must be less than TTL.
+                      Examples: "5m", "30d", "720h"
+                    type: string
+                  ttl:
+                    description: |-
+                      TTL specifies credential time-to-live (lifetime)
+                      For x509: certificate validity period (default: 2160h = 90 days)
+                      For oidc: ignored (placeholder for future implementation)
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$
+                    type: string
+                  type:
+                    description: Type specifies the authentication method (MANDATORY)
+                    enum:
+                    - x509
+                    - oidc
+                    type: string
+                required:
+                - type
+                type: object
               clusterRoles:
                 description: ClusterRoles is a list of cluster-wide ClusterRole bindings
                 items:
@@ -96,15 +133,12 @@ spec:
                   - namespace
                   type: object
                 type: array
+            required:
+            - auth
             type: object
           status:
             description: UserStatus defines the observed state of User
             properties:
-              certificateExpiry:
-                description: |-
-                  CertificateExpiry indicates if the expiry time comes from actual certificate
-                  Values: "Certificate", "Calculated", "Unknown"
-                type: string
               conditions:
                 description: Conditions follow Kubernetes conventions for detailed
                   status
@@ -171,9 +205,44 @@ spec:
               message:
                 description: Message provides details about the current status
                 type: string
+              nextRenewalAt:
+                description: |-
+                  NextRenewalAt is when the certificate will be automatically renewed
+                  This consolidates the previous RenewalTime and NextRenewalTime fields
+                format: date-time
+                type: string
               phase:
                 description: Phase is a simple high-level status (Pending, Active,
-                  Expired, Error)
+                  Expired, Error, Renewing)
+                type: string
+              renewalHistory:
+                description: RenewalHistory tracks recent renewal attempts for observability
+                items:
+                  description: RenewalAttempt tracks a single renewal attempt
+                  properties:
+                    csrName:
+                      description: CSRName is the name of the CSR created for this
+                        renewal
+                      type: string
+                    message:
+                      description: Message provides details about the renewal attempt
+                      type: string
+                    success:
+                      description: Success indicates if the renewal was successful
+                      type: boolean
+                    timestamp:
+                      description: Timestamp when the renewal was attempted
+                      format: date-time
+                      type: string
+                  required:
+                  - success
+                  - timestamp
+                  type: object
+                type: array
+              rotationStep:
+                description: |-
+                  RotationStep provides granular visibility into certificate rotation progress
+                  Values: GeneratingKey, CreatingCSR, WaitingForApproval, PerformingAtomicFlip, Finalizing
                 type: string
             type: object
         required:

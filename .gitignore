@@ -38,3 +38,4 @@ bin/
 *.pem
 *.p12
 *.pfx
+main

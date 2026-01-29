@@ -60,6 +60,9 @@ When deleting a User:
 #### 🚧 implemented Features
 - [X] Declarative User CRD with status tracking and finalizers
 - [X] Automatic client certificate generation via Kubernetes CSR API
+- [X] Stateful certificate rotation with Shadow Secret pattern
+- [X] Atomic secret updates with automatic rollback
+- [X] Resumable operations across controller restarts
 - [X] Certificate rotation 30 days before expiry
 - [X] Kubeconfig generation stored as Kubernetes secrets
 - [X] Namespace-scoped Role bindings (Role + RoleBinding)
@@ -191,16 +194,54 @@ kubectl get crd users.auth.openkube.io
 
 ## 🚀 Quick Start / Usage
 
+### How Defaults Work
+
+KubeUser uses a mutating admission webhook to apply defaults at resource creation:
+
+1. **You submit** a minimal User spec with only required fields
+2. **Webhook reads** environment variables from Helm configuration
+3. **Defaults applied** for any omitted optional fields (ttl, autoRenew)
+4. **Resource persisted** to etcd with defaults written into the spec
+5. **You can verify** applied defaults: `kubectl get user <name> -o yaml`
+
+**Example:**
+```yaml
+# You submit:
+spec:
+  auth:
+    type: x509  # Only required field
+
+# Webhook persists:
+spec:
+  auth:
+    type: x509
+    ttl: "2160h"      # Applied from KUBEUSER_DEFAULT_TTL
+    autoRenew: true   # Applied from KUBEUSER_DEFAULT_AUTORENEW
+```
+
+**Configuration:** SREs can customize defaults via Helm:
+```bash
+helm upgrade --install kubeuser ./helm/kubeuser \
+  --set authDefaults.ttl=720h \
+  --set authDefaults.autoRenew=false
+```
+
+**⚠️ Important:** Changes to `authDefaults` only apply to NEW users created after the Helm upgrade. Existing users retain their original defaults (persisted in spec).
+
 ### Basic User Creation
 
 Create a user with namespace-scoped access:
 
-```yaml path=null start=null
+```yaml
 apiVersion: auth.openkube.io/v1alpha1
 kind: User
 metadata:
   name: alice
 spec:
+  auth:
+    type: x509        # REQUIRED: must be 'x509' or 'oidc'
+    ttl: "72h"        # Optional: 3 days (default: 2160h = 3 months)
+    autoRenew: false  # Optional: disable auto-renewal (default: true)
   roles:
     - namespace: "development"
       existingRole: "developer"
@@ -210,24 +251,33 @@ spec:
 
 ### User with Cluster-wide Access
 
-```yaml path=null start=null
+```yaml
 apiVersion: auth.openkube.io/v1alpha1
 kind: User
 metadata:
   name: bob-admin
 spec:
+  auth:
+    type: x509
+    ttl: "2160h"      # 3 months (default)
+    autoRenew: true   # Enable automatic renewal
   clusterRoles:
     - existingClusterRole: "cluster-admin"
 ```
 
 ### Mixed Permissions Example
 
-```yaml path=null start=null
+```yaml
 apiVersion: auth.openkube.io/v1alpha1
 kind: User
 metadata:
   name: contractor-jane
 spec:
+  auth:
+    type: x509
+    ttl: "720h"       # 30 days
+    autoRenew: true
+    renewBefore: "72h" # Renew 3 days before expiry
   roles:
     - namespace: "project-x"
       existingRole: "developer"
@@ -243,12 +293,17 @@ spec:
 
 KubeUser supports binding existing cluster roles to specific namespaces, providing fine-grained access control:
 
-```yaml path=null start=null
+```yaml
 apiVersion: auth.openkube.io/v1alpha1
 kind: User
 metadata:
   name: namespace-admin
 spec:
+  auth:
+    type: x509
+    ttl: "168h"       # 1 week
+    autoRenew: true
+    renewBefore: "24h" # Renew 1 day before expiry
   roles:
     - namespace: "production"
       existingClusterRole: "admin"  # Full admin access to production namespace only
@@ -263,10 +318,68 @@ This approach allows you to:
 - Maintain consistent permission sets across different namespaces
 - Avoid creating duplicate namespace-scoped roles
 
+### Auto-Renewal Examples
+
+#### Basic Auto-Renewal (33% Rule)
+```yaml
+apiVersion: auth.openkube.io/v1alpha1
+kind: User
+metadata:
+  name: alice
+spec:
+  auth:
+    type: x509
+    ttl: "72h"        # 3 day certificate
+    autoRenew: true   # Renews after 48 hours (33% rule)
+  clusterRoles:
+    - existingClusterRole: "view"
+```
+
+#### Custom Renewal Timing
+```yaml
+apiVersion: auth.openkube.io/v1alpha1
+kind: User
+metadata:
+  name: bob
+spec:
+  auth:
+    type: x509
+    ttl: "168h"       # 7 day certificate
+    autoRenew: true
+    renewBefore: "48h" # Renew 48 hours before expiry
+  roles:
+    - namespace: "development"
+      existingClusterRole: "edit"
+```
+
+#### Production Standard Certificate
+```yaml
+apiVersion: auth.openkube.io/v1alpha1
+kind: User
+metadata:
+  name: charlie
+spec:
+  auth:
+    type: x509
+    ttl: "2160h"      # 90 days (production standard)
+    autoRenew: true
+    renewBefore: "720h" # Renew 30 days before expiry
+  roles:
+    - namespace: "production"
+      existingRole: "deployer"
+```
+
+**Note:** KubeUser enforces a 24-hour minimum TTL for production safety. Certificates shorter than 24h are rejected by the validating webhook to prevent Thundering Herd loops and API server exhaustion.
+
 ### Field Reference
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
+| `spec.auth` | `AuthSpec` | **Yes** | Authentication configuration (MANDATORY - cannot be omitted) |
+| `spec.auth.type` | `string` | **Yes** | Authentication method: `x509` or `oidc` (MANDATORY - no default) |
+| `spec.auth.ttl` | `string` | No | Certificate lifetime (default: `2160h` = 3 months). Default written by webhook at creation. |
+| `spec.auth.autoRenew` | `boolean` | No | Enable automatic certificate renewal (default: `true`). Default written by webhook at creation. |
+| `spec.auth.renewBefore` | `string` | No | Renew this duration before expiry (overrides 33% rule) |
 | `spec.roles` | `[]RoleSpec` | No | List of namespace-scoped role bindings |
 | `spec.roles[].namespace` | `string` | Yes | Target namespace for the role binding |
 | `spec.roles[].existingRole` | `string` | No* | Name of the existing Role in the namespace |
@@ -274,6 +387,86 @@ This approach allows you to:
 | `spec.clusterRoles` | `[]ClusterRoleSpec` | No | List of cluster-wide role bindings |
 | `spec.clusterRoles[].existingClusterRole` | `string` | Yes | Name of the existing ClusterRole |
 
+*Note: Either `existingRole` or `existingClusterRole` must be specified for each role entry.*
+
+
+### Managed Kubernetes Support
+
+KubeUser supports managed Kubernetes environments with custom CSR signers:
+
+**AWS EKS:**
+```bash
+helm install kubeuser ./helm/kubeuser \
+  --set signerName="beta.eks.amazonaws.com/app-client" \
+  --set rbac.signerResourceNames[0]="beta.eks.amazonaws.com/app-client"
+```
+
+**GKE/AKS:**
+Check your cluster's CSR signer name:
+```bash
+kubectl get csr -o jsonpath='{.items[0].spec.signerName}'
+```
+
+Then configure accordingly:
+```bash
+helm install kubeuser ./helm/kubeuser \
+  --set signerName="<your-signer-name>" \
+  --set rbac.signerResourceNames[0]="<your-signer-name>"
+```
+
+**Note:** The RBAC configuration must include the signer name in `signerResourceNames` to allow the controller to approve CSRs for that signer.
+
+### Observability and Monitoring
+
+**Check User Status:**
+```bash
+# View all users with status
+kubectl get users
+
+# Detailed status for specific user
+kubectl describe user alice
+
+# JSON output for programmatic access
+kubectl get user alice -o json | jq '.status'
+```
+
+**Monitor Certificate Expiry:**
+```bash
+# List all users with expiry times
+kubectl get users -o custom-columns=NAME:.metadata.name,EXPIRY:.status.expiryTime,NEXT_RENEWAL:.status.nextRenewalAt
+
+# Check if renewal is needed
+kubectl get users -o json | jq '.items[] | select(.status.nextRenewalAt != null) | {name: .metadata.name, nextRenewal: .status.nextRenewalAt}'
+```
+
+**View Renewal History:**
+```bash
+# Last 10 renewal attempts
+kubectl get user alice -o jsonpath='{.status.renewalHistory}' | jq
+
+# Check for failed renewals
+kubectl get users -o json | jq '.items[] | select(.status.renewalHistory[]?.success == false)'
+```
+
+**Monitor Conditions:**
+```bash
+# Check Ready condition
+kubectl get user alice -o jsonpath='{.status.conditions[?(@.type=="Ready")]}'
+
+# Check Renewing condition
+kubectl get user alice -o jsonpath='{.status.conditions[?(@.type=="Renewing")]}'
+```
+
+**Status Conditions:**
+KubeUser provides standard Kubernetes conditions for monitoring:
+- **Ready:** Indicates if the user's certificate is valid and ready for use
+- **Renewing:** Shows if a certificate renewal is currently in progress
+
+**Status Fields:**
+- `phase`: High-level status (Pending, Active, Expired, Error, Renewing)
+- `expiryTime`: Certificate expiry timestamp (RFC3339)
+- `nextRenewalAt`: When auto-renewal will trigger (only when autoRenew: true)
+- `renewalHistory`: Last 10 renewal attempts with timestamps and outcomes
 
 ### Managing Users
 
@@ -290,10 +483,10 @@ kubectl get users
 kubectl describe user jane
 
 # Get the generated kubeconfig
-kubectl get secret jane-kubeconfig -n kubeuser -o jsonpath='{.data.config}' | base64 -d > ~/tmp/kubeconfig
+kubectl get secret jane-kubeconfig -n kubeuser -o jsonpath='{.data.config}' | base64 -d > /tmp/kubeconfig
 
 # Test user access
-kubectl --kubeconfig ~/tmp/kubeconfig get pods -n dev
+kubectl --kubeconfig /tmp/kubeconfig get pods -n dev
 
 # Delete user (cleans up all associated resources)
 kubectl delete user jane
@@ -362,6 +555,21 @@ This script tests:
 
 ## ⚙️ Configuration
 
+### Certificate Duration Limits
+
+**Minimum TTL:** 24 hours (enforced by validating webhook)
+- Requests with TTL < 24h are rejected
+- Prevents Thundering Herd loops and API server exhaustion
+- Internal testing override: `KUBEUSER_MIN_DURATION` environment variable (not exposed in Helm)
+
+**Maximum TTL:** 1 year (8760h)
+- Based on Kubernetes default `--cluster-signing-duration` flag
+- Configurable by cluster administrators
+
+**Default TTL:** 90 days (2160h)
+- Applied by mutating webhook when not specified
+- Configurable via Helm `authDefaults.ttl`
+
 ### Environment Variables
 
 The operator supports the following environment variables:
@@ -370,6 +578,9 @@ The operator supports the following environment variables:
 |----------|---------|-------------|
 | `KUBERNETES_API_SERVER` | `https://kubernetes.default.svc` | Kubernetes API server address |
 | `CLUSTER_DOMAIN` | `cluster.local` | Kubernetes cluster DNS domain (change if your cluster uses a custom domain) |
+| `KUBEUSER_DEFAULT_TTL` | `2160h` | Default certificate TTL (set via Helm `authDefaults.ttl`) |
+| `KUBEUSER_DEFAULT_AUTORENEW` | `true` | Default auto-renewal behavior (set via Helm `authDefaults.autoRenew`) |
+| `KUBEUSER_SIGNER_NAME` | `kubernetes.io/kube-apiserver-client` | CSR signer name (set via Helm `signerName`) |
 
 ## 🔧 Troubleshooting
 

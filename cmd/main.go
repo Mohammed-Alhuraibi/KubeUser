@@ -95,6 +95,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Read configurable CSR signer name from environment for managed K8s support
+	// Default: kubernetes.io/kube-apiserver-client (standard K8s)
+	// EKS: beta.eks.amazonaws.com/app-client
+	// GKE/AKS: May use custom signers
+	signerName := os.Getenv("KUBEUSER_SIGNER_NAME")
+	if signerName == "" {
+		signerName = "kubernetes.io/kube-apiserver-client" // Default for standard K8s
+	}
+	setupLog.Info("Using CSR signer for certificate requests", "signerName", signerName)
+
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
 	// prevent from being vulnerable to the HTTP/2 Stream Cancellation and
@@ -189,8 +199,9 @@ func main() {
 	}
 
 	if err := (&controller.UserReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:     mgr.GetClient(),
+		Scheme:     mgr.GetScheme(),
+		SignerName: signerName, // Pass configurable signer for managed K8s support
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "User")
 		os.Exit(1)

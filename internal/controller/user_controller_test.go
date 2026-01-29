@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	authv1alpha1 "github.com/openkube-hub/KubeUser/api/v1alpha1"
+	"github.com/openkube-hub/KubeUser/internal/controller/auth"
 )
 
 var _ = Describe("User Controller", func() {
@@ -51,7 +52,12 @@ var _ = Describe("User Controller", func() {
 						Name:      resourceName,
 						Namespace: "default",
 					},
-					// TODO(user): Specify other spec details if needed.
+					Spec: authv1alpha1.UserSpec{
+						Auth: &authv1alpha1.AuthSpec{
+							Type: &[]string{auth.AuthTypeX509}[0],
+							TTL:  "24h",
+						},
+					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}

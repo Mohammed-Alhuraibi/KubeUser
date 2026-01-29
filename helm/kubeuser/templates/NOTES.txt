@@ -28,26 +28,50 @@
 2. Verify the CRD is installed:
    kubectl get crd users.auth.openkube.io
 
-3. Create your first user:
+3. Create your first user with x509 authentication:
    cat <<EOF | kubectl apply -f -
    apiVersion: auth.openkube.io/v1alpha1
    kind: User
    metadata:
      name: example-user
    spec:
+     auth:
+       type: x509              # Authentication type (x509 or oidc)
+       ttl: "720h"             # Certificate lifetime (30 days)
+       autoRenew: true         # Enable automatic renewal
+       renewBefore: "240h"     # Renew 10 days before expiry
      clusterRoles:
-         existingClusterRole: view
+       - existingClusterRole: view
    EOF
 
-4. Check user status:
+4. Create a user with minimal configuration (defaults to x509):
+   cat <<EOF | kubectl apply -f -
+   apiVersion: auth.openkube.io/v1alpha1
+   kind: User
+   metadata:
+     name: simple-user
+   spec:
+     auth:
+       type: x509
+     clusterRoles:
+       - existingClusterRole: edit
+   EOF
+
+5. Check user status:
    kubectl get users
    kubectl describe user example-user
+
+6. Retrieve the generated kubeconfig:
+   kubectl get secret example-user-kubeconfig -o jsonpath='{.data.kubeconfig}' | base64 -d > example-user.kubeconfig
 
 📖 Documentation:
    For more information, visit: https://github.com/openkube-hub/KubeUser
 
 💡 Tips:
    - Users are cluster-scoped resources
+   - Auth type defaults to x509 if not specified
+   - minimum TTL is 24h
+   - renewBefore is capped at 50% of TTL to prevent renewal loops
    - The operator automatically generates kubeconfig files as secrets
    - Use 'kubectl get secrets' to find generated kubeconfig files
    - Set appropriate RBAC roles before creating users

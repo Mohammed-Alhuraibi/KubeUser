@@ -1,0 +1,12 @@
+apiVersion: auth.openkube.io/v1alpha1
+kind: User
+metadata:
+  name: short-ttl-user
+spec:
+  auth:
+    type: x509
+    ttl: "12h"  # WILL BE REJECTED: Less than 24h minimum in production
+    renewBefore: "4h"
+    autoRenew: true
+  clusterRoles:
+    - existingClusterRole: view

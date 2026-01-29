@@ -1,0 +1,11 @@
+apiVersion: auth.openkube.io/v1alpha1
+kind: User
+metadata:
+  name: invalid-missing-type
+spec:
+  # Invalid: auth section without type field
+  # This should be rejected by the webhook with:
+  # "spec.auth.type is mandatory (e.g., x509)"
+  auth: {}
+  clusterRoles:
+    - existingClusterRole: view
