@@ -325,12 +325,12 @@ This approach allows you to:
 apiVersion: auth.openkube.io/v1alpha1
 kind: User
 metadata:
-  name: alice-auto
+  name: alice
 spec:
   auth:
     type: x509
-    ttl: "24h"        # 24 hour certificate
-    autoRenew: true   # Renews after 16 hours (33% rule)
+    ttl: "72h"        # 3 day certificate
+    autoRenew: true   # Renews after 48 hours (33% rule)
   clusterRoles:
     - existingClusterRole: "view"
 ```
@@ -340,34 +340,36 @@ spec:
 apiVersion: auth.openkube.io/v1alpha1
 kind: User
 metadata:
-  name: bob-custom
+  name: bob
 spec:
   auth:
     type: x509
-    ttl: "2h"         # 2 hour certificate
+    ttl: "168h"       # 7 day certificate
     autoRenew: true
-    renewBefore: "30m" # Renew 30 minutes before expiry
+    renewBefore: "48h" # Renew 48 hours before expiry
   roles:
     - namespace: "development"
       existingClusterRole: "edit"
 ```
 
-#### Short-lived Certificate
+#### Production Standard Certificate
 ```yaml
 apiVersion: auth.openkube.io/v1alpha1
 kind: User
 metadata:
-  name: charlie-short
+  name: charlie
 spec:
   auth:
     type: x509
-    ttl: "10m"        # 10 minute certificate (minimum)
+    ttl: "2160h"      # 90 days (production standard)
     autoRenew: true
-    renewBefore: "3m" # Auto-corrected if too aggressive
+    renewBefore: "720h" # Renew 30 days before expiry
   roles:
-    - namespace: "testing"
-      existingRole: "tester"
+    - namespace: "production"
+      existingRole: "deployer"
 ```
+
+**Note:** KubeUser enforces a 24-hour minimum TTL for production safety. Certificates shorter than 24h are rejected by the validating webhook to prevent Thundering Herd loops and API server exhaustion.
 
 ### Field Reference
 
