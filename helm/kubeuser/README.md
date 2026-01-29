@@ -43,6 +43,29 @@ helm install kubeuser ./helm/kubeuser -n my-existing-namespace
 
 ## Configuration
 
+### Authentication Defaults Configuration
+
+KubeUser allows SREs to customize default authentication settings via Helm values:
+
+```yaml
+authDefaults:
+  ttl: "2160h"      # Default certificate lifetime (90 days)
+  autoRenew: true   # Default auto-renewal behavior
+```
+
+**How It Works:**
+1. Helm values are mapped to environment variables in the deployment
+2. Controller reads environment variables at startup
+3. Mutating webhook applies defaults when User resources are created
+4. Defaults are persisted into the User spec (visible in etcd)
+
+**Environment Variable Mapping:**
+- `authDefaults.ttl` → `KUBEUSER_DEFAULT_TTL`
+- `authDefaults.autoRenew` → `KUBEUSER_DEFAULT_AUTORENEW`
+- `signerName` → `KUBEUSER_SIGNER_NAME`
+
+**⚠️  Important:** Changes to `authDefaults` only apply to NEW users created after the Helm upgrade. Existing users retain their original defaults (persisted in spec).
+
 ### Namespace Configuration
 
 **Important:** The controller creates user resources (secrets, kubeconfigs) in the same namespace where it is deployed.
@@ -114,7 +137,7 @@ metadata:
   name: alice
 spec:
   auth:
-    type: x509  # Required: must be 'x509' or 'oidc'
+    type: x509  # REQUIRED: must be 'x509' or 'oidc'
     ttl: "2160h"  # Optional: defaults to 2160h (90 days)
     autoRenew: true  # Optional: defaults to true
   roles:

@@ -57,12 +57,15 @@ metadata:
 spec:
   auth:
     type: x509
-    ttl: "10m"         # KubeUser minimum (Kubernetes CSR API allows 3m minimum)
+    ttl: "24h"         # KubeUser production minimum (24 hours)
     autoRenew: true
-    renewBefore: "3m"  # Will be auto-corrected if too aggressive
+    renewBefore: "8h"  # Renew 8 hours before expiry
 ```
 
-**Note**: While Kubernetes CSR API allows certificates as short as 3 minutes, KubeUser enforces a 10-minute minimum for practical usability and to ensure sufficient time for certificate distribution and rotation operations.
+**Note:** 
+- **Production Minimum:** KubeUser enforces a 24-hour minimum TTL to prevent Thundering Herd loops
+- **Testing Override:** The `KUBEUSER_MIN_DURATION` environment variable can override this for CI/CD (not exposed in Helm)
+- **Kubernetes CSR API:** Technical minimum is 3 minutes, but KubeUser enforces 24 hours for operational safety
 
 ## Renewal Logic Hierarchy
 
@@ -87,9 +90,9 @@ The system automatically validates and corrects aggressive renewal settings:
 |----------------|-------------|-------------------|------------|-------|
 | 24h | (not set) | After 16h | 33% rule | Standard behavior |
 | 24h | 6h | After 18h | Custom renewBefore | User override |
-| 10m | (not set) | After 6m40s | 33% rule | Short-lived cert |
-| 10m | 1m | After 8m | Auto-corrected | Too aggressive, safety applied |
-| 10m | 8m | After 5.5m | Auto-corrected | Capped at 90% rule |
+| 24h | 1h | After 22h | Custom renewBefore | Short renewal window |
+| 72h | (not set) | After 48h | 33% rule | 3-day certificate |
+| 72h | 24h | After 48h | Custom renewBefore | 1-day before expiry |
 
 ## Status Fields
 
@@ -227,7 +230,8 @@ kubectl get secrets -l auth.openkube.io/rotation=true
 
 ### Duration Constraints
 - **Kubernetes CSR API**: Allows minimum 3 minutes via `expirationSeconds`
-- **KubeUser Enforcement**: 10-minute minimum for practical operations
+- **KubeUser Production Enforcement**: 24-hour minimum for operational safety
+- **Testing Override**: `KUBEUSER_MIN_DURATION` environment variable (not exposed in Helm)
 - **Maximum Duration**: 1 year (based on default `--cluster-signing-duration` flag)
 - **Cluster Administrator Note**: The maximum can be adjusted by changing the Kubernetes controller's `--cluster-signing-duration` flag, but KubeUser maintains the 1-year limit for security consistency
 

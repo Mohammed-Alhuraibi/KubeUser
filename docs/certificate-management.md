@@ -192,7 +192,7 @@ spec:
 ### Environment Variables
 
 - **KUBERNETES_API_SERVER**: API server URL for kubeconfig generation (default: `https://kubernetes.default.svc`)
-- **KUBEUSER_MIN_DURATION**: Minimum certificate duration for testing (default: `10m`)
+- **KUBEUSER_MIN_DURATION**: Internal testing override for minimum TTL (default: `24h`, not exposed in Helm values.yaml)
 
 ## Troubleshooting
 

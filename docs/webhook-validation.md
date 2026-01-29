@@ -7,25 +7,63 @@ The KubeUser operator includes an admission webhook that validates User resource
 ## Features
 
 - **Pre-persistence validation**: User resources are validated before being stored in etcd
+- **Mandatory identity enforcement**: Ensures `spec.auth` and `spec.auth.type` are provided (no defaults)
 - **Role existence validation**: Verifies that all referenced Roles exist in their specified namespaces
 - **ClusterRole existence validation**: Verifies that all referenced ClusterRoles exist
 - **Mutual exclusion validation**: Ensures only one of `existingRole` or `existingClusterRole` is specified per role entry
 - **Required field validation**: Ensures at least one role reference is provided when roles are specified
-- **Auth specification validation**: Validates TTL, renewBefore, and other auth configuration
-- **Renewal configuration validation**: Validates auto-renewal settings when enabled
+- **Auth specification validation**: Validates TTL (24h minimum, 1 year maximum), renewBefore, and other auth configuration
+- **Renewal configuration validation**: Validates auto-renewal settings when enabled (50% cap, 5-minute safety floor)
+- **Mutating webhook**: Applies defaults for optional fields (ttl, autoRenew) from environment variables
 - **Clear error messages**: Provides descriptive error messages when validation fails
 
 ## How it Works
 
+### Validation Webhook
+
 1. When a User resource is created or updated, the Kubernetes API server sends an admission review to the webhook
 2. The webhook validates that:
+   - `spec.auth` is provided (MANDATORY - no default)
+   - `spec.auth.type` is provided (MANDATORY - no default)
    - All referenced Roles exist in their specified namespaces
    - All referenced ClusterRoles exist
    - Each role entry has exactly one of `existingRole` or `existingClusterRole` specified
    - Auth specification is valid (TTL within limits, valid duration format)
+   - TTL is at least 24 hours (production minimum)
    - Renewal configuration is valid when auto-renewal is enabled
-3. If validation passes, the User resource is allowed to be persisted
+3. If validation passes, the request proceeds to the mutating webhook
 4. If validation fails, the operation is rejected with a clear error message
+
+### Mutating Webhook
+
+After validation passes, the mutating webhook applies defaults:
+
+1. **Reads environment variables** from Helm configuration:
+   - `KUBEUSER_DEFAULT_TTL` (from `authDefaults.ttl`)
+   - `KUBEUSER_DEFAULT_AUTORENEW` (from `authDefaults.autoRenew`)
+
+2. **Applies defaults** using `auth.GetSafeAuthSpec()` (single source of truth):
+   - Sets `ttl` if not provided (default: `2160h`)
+   - Sets `autoRenew` if not provided (default: `true`)
+
+3. **Persists to etcd** with defaults written into the spec
+
+4. **User can verify** applied defaults: `kubectl get user <name> -o yaml`
+
+**Example:**
+```yaml
+# User submits:
+spec:
+  auth:
+    type: x509  # Only required field provided
+
+# Webhook persists:
+spec:
+  auth:
+    type: x509
+    ttl: "2160h"      # Applied from KUBEUSER_DEFAULT_TTL
+    autoRenew: true   # Applied from KUBEUSER_DEFAULT_AUTORENEW
+```
 
 ## Webhook Certificate Management
 
@@ -72,9 +110,9 @@ metadata:
   name: jane-doe
 spec:
   auth:
-    type: x509
-    ttl: "2160h"  # 3 months
-    autoRenew: true
+    type: x509        # REQUIRED - cannot be omitted
+    ttl: "2160h"      # Optional - 3 months (default if omitted)
+    autoRenew: true   # Optional - enable auto-renewal (default if omitted)
   roles:
     - namespace: default
       existingRole: developer  # This role must exist in the 'default' namespace
@@ -85,6 +123,16 @@ spec:
 ```
 
 ### Validation Errors
+
+**Missing auth section:**
+```
+error validating User resource: the auth section is mandatory. Please provide spec.auth.type
+```
+
+**Missing auth type:**
+```
+error validating User resource: spec.auth.type is mandatory (e.g., x509)
+```
 
 **Missing Role:**
 ```
@@ -106,14 +154,24 @@ error validating User resource: cannot specify both existingRole and existingClu
 error validating User resource: either existingRole or existingClusterRole must be specified for namespace 'default'
 ```
 
-**Invalid TTL:**
+**Invalid TTL (below 24h minimum):**
+```
+error validating User resource: invalid auth specification: TTL must be at least 24h0m0s, got: 1h0m0s
+```
+
+**Invalid TTL (above 1 year maximum):**
 ```
 error validating User resource: invalid auth specification: TTL must not exceed 8760h0m0s, got: 17520h0m0s
 ```
 
-**Invalid renewal configuration:**
+**Invalid renewal configuration (50% cap):**
 ```
-error validating User resource: invalid renewal configuration: renewBefore too aggressive, capped at 90% (54m0s)
+error validating User resource: invalid renewal configuration: renewBefore (15h) exceeds 50% of TTL (24h). Maximum allowed: 12h. This prevents aggressive renewal loops and API-server exhaustion
+```
+
+**Invalid renewal configuration (5-minute safety floor):**
+```
+error validating User resource: invalid renewal configuration: renewBefore (23h55m) leaves less than 5 minutes of certificate life (TTL: 24h). This would cause immediate renewal loops. Minimum certificate life required: 5m
 ```
 
 ## Deployment
