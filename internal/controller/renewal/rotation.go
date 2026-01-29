@@ -48,13 +48,19 @@ const (
 type RotationManager struct {
 	client        client.Client
 	eventRecorder record.EventRecorder
+	signerName    string // Configurable signer for managed K8s support (EKS, GKE, AKS)
 }
 
-// NewRotationManager creates a new rotation manager
-func NewRotationManager(k8sClient client.Client, eventRecorder record.EventRecorder) *RotationManager {
+// NewRotationManager creates a new rotation manager with configurable signer
+func NewRotationManager(k8sClient client.Client, eventRecorder record.EventRecorder, signerName string) *RotationManager {
+	// Default to standard Kubernetes signer if not specified
+	if signerName == "" {
+		signerName = certv1.KubeAPIServerClientSignerName
+	}
 	return &RotationManager{
 		client:        k8sClient,
 		eventRecorder: eventRecorder,
+		signerName:    signerName,
 	}
 }
 
@@ -415,7 +421,7 @@ func (rm *RotationManager) ensureCSRExists(ctx context.Context, user *authv1alph
 		Spec: certv1.CertificateSigningRequestSpec{
 			Request:           csrPEM,
 			Usages:            []certv1.KeyUsage{certv1.UsageClientAuth},
-			SignerName:        certv1.KubeAPIServerClientSignerName,
+			SignerName:        rm.signerName, // Use configurable signer for managed K8s support
 			ExpirationSeconds: &expirationSeconds,
 		},
 	}
@@ -819,9 +825,9 @@ func (rm *RotationManager) extractCertificateExpiry(certData []byte) (time.Time,
 
 // validateCSRForApproval validates a CSR before auto-approval for security
 func (rm *RotationManager) validateCSRForApproval(csr *certv1.CertificateSigningRequest) error {
-	// Validate signer name
-	if csr.Spec.SignerName != certv1.KubeAPIServerClientSignerName {
-		return fmt.Errorf("invalid signer name: %s", csr.Spec.SignerName)
+	// Validate signer name matches configured signer (supports managed K8s)
+	if csr.Spec.SignerName != rm.signerName {
+		return fmt.Errorf("invalid signer name: %s (expected: %s)", csr.Spec.SignerName, rm.signerName)
 	}
 
 	// Validate usages

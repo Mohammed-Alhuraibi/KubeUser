@@ -51,6 +51,8 @@
    metadata:
      name: simple-user
    spec:
+     auth:
+       type: x509
      clusterRoles:
        - existingClusterRole: edit
    EOF

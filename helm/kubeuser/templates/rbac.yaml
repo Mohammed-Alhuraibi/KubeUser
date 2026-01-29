@@ -112,7 +112,9 @@ rules:
   resources:
   - signers
   resourceNames:
-  - kubernetes.io/kube-apiserver-client
+  {{- range .Values.rbac.signerResourceNames }}
+  - {{ . }}
+  {{- end }}
   verbs:
   - approve
 - apiGroups:

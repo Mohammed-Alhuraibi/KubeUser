@@ -65,17 +65,19 @@ func (w *UserWebhook) Default(ctx context.Context, obj runtime.Object) error {
 		return nil
 	}
 
-	// Set default TTL if not specified
-	if user.Spec.Auth.TTL == "" {
-		user.Spec.Auth.TTL = auth.DefaultTTL
-		logger.Info("Set default TTL", "user", user.Name, "ttl", auth.DefaultTTL)
+	// Use GetSafeAuthSpec to apply defaults (single source of truth)
+	// This ensures webhook and controller use identical default values
+	safeAuth := auth.GetSafeAuthSpec(user)
+
+	// Apply defaults back to user.Spec.Auth if they were missing
+	if user.Spec.Auth.TTL == "" && safeAuth.TTL != "" {
+		user.Spec.Auth.TTL = safeAuth.TTL
+		logger.Info("Set default TTL", "user", user.Name, "ttl", safeAuth.TTL)
 	}
 
-	// Set default AutoRenew if not specified
-	if user.Spec.Auth.AutoRenew == nil {
-		trueVal := true
-		user.Spec.Auth.AutoRenew = &trueVal
-		logger.Info("Set default AutoRenew", "user", user.Name, "autoRenew", true)
+	if user.Spec.Auth.AutoRenew == nil && safeAuth.AutoRenew != nil {
+		user.Spec.Auth.AutoRenew = safeAuth.AutoRenew
+		logger.Info("Set default AutoRenew", "user", user.Name, "autoRenew", *safeAuth.AutoRenew)
 	}
 
 	return nil
@@ -239,6 +241,12 @@ func (w *UserWebhook) validateAuthSpec(user *authv1alpha1.User) error {
 
 	// Get safe auth spec with defaults applied (single source of truth)
 	safeAuth := auth.GetSafeAuthSpec(user)
+
+	// CRITICAL: Explicitly reject OIDC at webhook level (not yet implemented)
+	// This prevents resources from being created and failing later in the controller
+	if safeAuth.Type != nil && *safeAuth.Type == "oidc" {
+		return fmt.Errorf("OIDC authentication is not yet implemented. Please use 'x509' for certificate-based authentication")
+	}
 
 	// PRODUCTION HARDENING: Strict webhook validation for renewal configuration
 	if safeAuth.AutoRenew != nil && *safeAuth.AutoRenew {

@@ -37,19 +37,25 @@ const (
 )
 
 func EnsureCertKubeconfig(ctx context.Context, r client.Client, user *authv1alpha1.User) (bool, bool, error) {
-	// Use default duration (3 months)
+	// Use default duration (3 months) and default signer
 	defaultDuration := 90 * 24 * time.Hour
-	return EnsureCertKubeconfigWithDuration(ctx, r, user, defaultDuration)
+	defaultSigner := certv1.KubeAPIServerClientSignerName
+	return EnsureCertKubeconfigWithDuration(ctx, r, user, defaultDuration, defaultSigner)
 }
 
-// EnsureCertKubeconfigWithDuration ensures certificate kubeconfig with custom duration.
+// EnsureCertKubeconfigWithDuration ensures certificate kubeconfig with custom duration and configurable signer.
 // Returns (statusChanged bool, requeueNeeded bool, error) where:
 // - statusChanged: true if user.Status.ExpiryTime or user.Status.NextRenewalAt were modified in memory
 // - requeueNeeded: true if the controller needs to requeue (CSR pending, approval needed, etc.)
 // - error: any execution error
 // This function does NOT perform any r.Status().Update() calls - it only modifies the user object in memory.
 // The caller (orchestrator) is responsible for persisting status changes to etcd.
-func EnsureCertKubeconfigWithDuration(ctx context.Context, r client.Client, user *authv1alpha1.User, duration time.Duration) (bool, bool, error) {
+func EnsureCertKubeconfigWithDuration(ctx context.Context, r client.Client, user *authv1alpha1.User, duration time.Duration, signerName string) (bool, bool, error) {
+	// Default to standard Kubernetes signer if not specified
+	if signerName == "" {
+		signerName = certv1.KubeAPIServerClientSignerName
+	}
+
 	username := user.Name
 	userNamespace := helpers.GetKubeUserNamespace()
 	keySecretName := fmt.Sprintf("%s-key", username)
@@ -131,7 +137,7 @@ func EnsureCertKubeconfigWithDuration(ctx context.Context, r client.Client, user
 			Spec: certv1.CertificateSigningRequestSpec{
 				Request:           csrPEM,
 				Usages:            []certv1.KeyUsage{certv1.UsageClientAuth},
-				SignerName:        certv1.KubeAPIServerClientSignerName,
+				SignerName:        signerName, // Use configurable signer for managed K8s support
 				ExpirationSeconds: &expirationSeconds,
 			},
 		}

@@ -8,6 +8,7 @@ import (
 
 	authv1alpha1 "github.com/openkube-hub/KubeUser/api/v1alpha1"
 	"github.com/openkube-hub/KubeUser/internal/controller/helpers"
+	certv1 "k8s.io/api/certificates/v1"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -43,15 +44,21 @@ type Manager struct {
 	eventRecorder record.EventRecorder
 	x509          Provider
 	oidc          Provider
+	signerName    string // Configurable signer for managed K8s support
 }
 
-// NewManager creates a new auth manager with the provided client and event recorder
-func NewManager(c client.Client, eventRecorder record.EventRecorder) *Manager {
+// NewManager creates a new auth manager with the provided client, event recorder, and optional signer name
+func NewManager(c client.Client, eventRecorder record.EventRecorder, signerName string) *Manager {
+	// Default to standard Kubernetes signer if not specified
+	if signerName == "" {
+		signerName = certv1.KubeAPIServerClientSignerName
+	}
 	return &Manager{
 		client:        c,
 		eventRecorder: eventRecorder,
-		x509:          NewX509Provider(c, eventRecorder),
+		x509:          NewX509Provider(c, eventRecorder, signerName),
 		oidc:          NewOIDCProvider(c),
+		signerName:    signerName,
 	}
 }
 
@@ -192,9 +199,10 @@ func GetAuthDuration(user *authv1alpha1.User) time.Duration {
 }
 
 // getMinimumDuration returns the minimum allowed duration for certificates
-// Can be overridden with KUBEUSER_MIN_DURATION environment variable for testing
-// Production default is 24h to prevent Thundering Herd loops and API-server exhaustion
+// Production minimum: 24 hours (hardcoded to prevent Thundering Herd loops)
+// Internal Override: KUBEUSER_MIN_DURATION (for CI/CD and testing only, not documented)
 func getMinimumDuration() time.Duration {
+	// Internal testing override (not documented in Helm values.yaml)
 	if minDurStr := os.Getenv("KUBEUSER_MIN_DURATION"); minDurStr != "" {
 		if minDur, err := time.ParseDuration(minDurStr); err == nil {
 			return minDur
@@ -256,11 +264,12 @@ func ValidateRenewalConfig(user *authv1alpha1.User) error {
 // Logic:
 // - If user.Spec.Auth is nil, returns a zero-spec (validation will handle the error)
 // - If Type is nil, returns zero-spec (invalid configuration)
-// - Applies production defaults for secondary fields:
-//   - TTL: DefaultTTL (2160h = 90 days)
-//   - AutoRenew: true
+// - Applies dynamic defaults from environment variables (Helm bridge):
+//   - TTL: KUBEUSER_DEFAULT_TTL (fallback: 2160h = 90 days)
+//   - AutoRenew: KUBEUSER_DEFAULT_AUTORENEW (fallback: true)
 //
-// This ensures the mutating webhook persists the exact same defaults that the controller expects.
+// This ensures the mutating webhook persists the exact same defaults that the controller expects,
+// and respects the SRE's Helm values.yaml configuration.
 func GetSafeAuthSpec(user *authv1alpha1.User) authv1alpha1.AuthSpec {
 	// Return zero-spec if Auth is nil; webhook prevents this in production
 	if user.Spec.Auth == nil {
@@ -274,14 +283,27 @@ func GetSafeAuthSpec(user *authv1alpha1.User) authv1alpha1.AuthSpec {
 		return authv1alpha1.AuthSpec{}
 	}
 
-	// Apply defaults for secondary fields
+	// Apply dynamic defaults for secondary fields (Helm bridge)
 	if spec.TTL == "" {
-		spec.TTL = DefaultTTL
+		// Read from environment variable (set by Helm values.yaml)
+		defaultTTL := os.Getenv("KUBEUSER_DEFAULT_TTL")
+		if defaultTTL == "" {
+			defaultTTL = DefaultTTL // Fallback to production standard (2160h = 90 days)
+		}
+		spec.TTL = defaultTTL
 	}
 
 	if spec.AutoRenew == nil {
-		trueVal := true
-		spec.AutoRenew = &trueVal
+		// Read from environment variable (set by Helm values.yaml)
+		defaultAutoRenew := true // Production default
+		if autoRenewStr := os.Getenv("KUBEUSER_DEFAULT_AUTORENEW"); autoRenewStr != "" {
+			// Parse boolean from string (true/false, 1/0, yes/no)
+			switch autoRenewStr {
+			case "false", "0", "no", "False", "NO":
+				defaultAutoRenew = false
+			}
+		}
+		spec.AutoRenew = &defaultAutoRenew
 	}
 
 	return spec

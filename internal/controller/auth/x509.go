@@ -9,6 +9,7 @@ import (
 	"github.com/openkube-hub/KubeUser/internal/controller/certs"
 	"github.com/openkube-hub/KubeUser/internal/controller/helpers"
 	"github.com/openkube-hub/KubeUser/internal/controller/renewal"
+	certv1 "k8s.io/api/certificates/v1"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -20,14 +21,20 @@ type X509Provider struct {
 	client            client.Client
 	renewalCalculator *renewal.RenewalCalculator
 	rotationManager   *renewal.RotationManager
+	signerName        string // Configurable signer for managed K8s support
 }
 
-// NewX509Provider creates a new x509 auth provider
-func NewX509Provider(c client.Client, eventRecorder record.EventRecorder) *X509Provider {
+// NewX509Provider creates a new x509 auth provider with configurable signer
+func NewX509Provider(c client.Client, eventRecorder record.EventRecorder, signerName string) *X509Provider {
+	// Default to standard Kubernetes signer if not specified
+	if signerName == "" {
+		signerName = certv1.KubeAPIServerClientSignerName
+	}
 	return &X509Provider{
 		client:            c,
 		renewalCalculator: renewal.NewRenewalCalculator(),
-		rotationManager:   renewal.NewRotationManager(c, eventRecorder),
+		rotationManager:   renewal.NewRotationManager(c, eventRecorder, signerName),
+		signerName:        signerName,
 	}
 }
 
@@ -124,7 +131,7 @@ func (p *X509Provider) Ensure(ctx context.Context, user *authv1alpha1.User) (boo
 
 	// Use existing certificate logic for initial creation or non-renewal updates
 	// CRITICAL: Capture statusChanged from certs package to bubble up to orchestrator
-	statusChanged, requeueNeeded, err := certs.EnsureCertKubeconfigWithDuration(ctx, p.client, user, duration)
+	statusChanged, requeueNeeded, err := certs.EnsureCertKubeconfigWithDuration(ctx, p.client, user, duration, p.signerName)
 	if err != nil {
 		return statusChanged, nil, fmt.Errorf("failed to ensure certificate kubeconfig: %v", err)
 	}

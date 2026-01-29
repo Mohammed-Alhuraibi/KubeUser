@@ -48,6 +48,12 @@ spec:
           value: {{ include "kubeuser.fullname" . }}-webhook-service
         - name: KUBEUSER_NAMESPACE
           value: {{ .Release.Namespace }}
+        - name: KUBEUSER_SIGNER_NAME
+          value: {{ (.Values.signerName | default "kubernetes.io/kube-apiserver-client") | quote }}
+        - name: KUBEUSER_DEFAULT_TTL
+          value: {{ .Values.authDefaults.ttl | quote }}
+        - name: KUBEUSER_DEFAULT_AUTORENEW
+          value: {{ .Values.authDefaults.autoRenew | quote }}
         {{- with .Values.env }}
         {{- range $key, $value := . }}
         - name: {{ $key }}

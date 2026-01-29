@@ -36,6 +36,7 @@ type UserReconciler struct {
 	EventRecorder     record.EventRecorder
 	AuthManager       *auth.Manager
 	RenewalCalculator *renewal.RenewalCalculator
+	SignerName        string // Configurable CSR signer for managed K8s support (EKS, GKE, AKS)
 }
 
 // RBAC rules
@@ -55,7 +56,7 @@ type UserReconciler struct {
 // CSR resources
 // +kubebuilder:rbac:groups=certificates.k8s.io,resources=certificatesigningrequests,verbs=create;get;list;watch;update;patch;delete
 // +kubebuilder:rbac:groups=certificates.k8s.io,resources=certificatesigningrequests/approval,verbs=update
-// +kubebuilder:rbac:groups=certificates.k8s.io,resources=signers,verbs=approve,resourceNames=kubernetes.io/kube-apiserver-client
+// +kubebuilder:rbac:groups=certificates.k8s.io,resources=signers,verbs=approve,resourceNames=kubernetes.io/kube-apiserver-client;beta.eks.amazonaws.com/app-client
 // Admission resources
 // +kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=validatingwebhookconfigurations,verbs=get;patch
 
@@ -317,7 +318,7 @@ func (r *UserReconciler) reconcileAuthentication(ctx context.Context, user *auth
 
 	// Initialize auth manager if needed
 	if r.AuthManager == nil {
-		r.AuthManager = auth.NewManager(r.Client, r.EventRecorder)
+		r.AuthManager = auth.NewManager(r.Client, r.EventRecorder, r.SignerName)
 	}
 
 	// Capture old values before authentication processing
@@ -578,9 +579,14 @@ func (r *UserReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		r.EventRecorder = mgr.GetEventRecorderFor("user-controller")
 	}
 
-	// Initialize auth manager
+	// Default signer name if not specified
+	if r.SignerName == "" {
+		r.SignerName = "kubernetes.io/kube-apiserver-client"
+	}
+
+	// Initialize auth manager with configurable signer
 	if r.AuthManager == nil {
-		r.AuthManager = auth.NewManager(r.Client, r.EventRecorder)
+		r.AuthManager = auth.NewManager(r.Client, r.EventRecorder, r.SignerName)
 	}
 
 	// Initialize renewal calculator

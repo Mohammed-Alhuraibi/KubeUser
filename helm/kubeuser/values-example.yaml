@@ -151,7 +151,16 @@ metrics:
     type: ClusterIP
     port: 8080
 
-# Environment variables
+# Authentication and renewal defaults (documented behavior)
+# NOTE: These values are not wired into templates; they describe the operator's
+# internal defaults, which are persisted via the mutating webhook:
+# - TTL: 2160h (90 days)
+# - AutoRenew: true
+authDefaults:
+  ttl: "2160h"
+  autoRenew: true
+
+# Environment variables (additional to the core operator settings below)
 env:
   KUBERNETES_API_SERVER: "https://kubernetes.default.svc"
   CLUSTER_DOMAIN: "cluster.local"
@@ -159,9 +168,20 @@ env:
   ENABLE_PROFILING: "false"
   METRICS_ADDR: ":8080"
 
+# CSR signer configuration (managed Kubernetes support)
+# This controls which Kubernetes signer is used for certificate CSRs.
+# - Vanilla Kubernetes: kubernetes.io/kube-apiserver-client
+# - EKS:                beta.eks.amazonaws.com/app-client
+# - GKE/AKS/custom:     set to your cluster's signer name
+signerName: "kubernetes.io/kube-apiserver-client"
+
 # RBAC configuration
 rbac:
   create: true
+  # Signer names that KubeUser is allowed to approve CSRs for.
+  # This must include the signer configured via .Values.signerName.
+  signerResourceNames:
+    - "kubernetes.io/kube-apiserver-client"
 
 # CRD configuration
 crds:
