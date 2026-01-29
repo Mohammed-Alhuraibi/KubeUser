@@ -62,152 +62,272 @@ func EnsureCertKubeconfigWithDuration(ctx context.Context, r client.Client, user
 	cfgSecretName := fmt.Sprintf("%s-kubeconfig", username)
 	csrName := fmt.Sprintf("%s-csr", username)
 
-	// Verify that the target namespace exists
-	var ns corev1.Namespace
-	if err := r.Get(ctx, types.NamespacedName{Name: userNamespace}, &ns); err != nil {
-		if apierrors.IsNotFound(err) {
-			return false, false, fmt.Errorf("target namespace '%s' does not exist - please create it before deploying KubeUser or use Helm with --create-namespace", userNamespace)
-		}
-		return false, false, fmt.Errorf("failed to verify namespace '%s': %w", userNamespace, err)
-	}
-
-	// Check if certificate needs rotation
-	// Rotation threshold can be configured via KUBEUSER_ROTATION_THRESHOLD environment variable
-	rotationThreshold := getRotationThreshold(duration)
-
-	needsRotation, err := checkCertificateRotation(ctx, r, cfgSecretName, rotationThreshold)
-	if err != nil {
-		return false, false, fmt.Errorf("failed to check certificate rotation: %w", err)
-	}
-
-	if needsRotation {
-		// Clean up existing resources for rotation
-		logger := logf.FromContext(ctx)
-		logger.Info("Certificate needs rotation, cleaning up existing resources", "user", username)
-		if err := cleanupCertificateResources(ctx, r, cfgSecretName, csrName); err != nil {
-			return false, false, fmt.Errorf("failed to cleanup certificate resources: %w", err)
-		}
-	}
-
-	// 1. Load/create key Secret
-	var keySecret corev1.Secret
-	err = r.Get(ctx, types.NamespacedName{Name: keySecretName, Namespace: userNamespace}, &keySecret)
-	var keyPEM []byte
-	if apierrors.IsNotFound(err) {
-		key, err := rsa.GenerateKey(rand.Reader, 2048)
-		if err != nil {
-			return false, false, err
-		}
-		keyPEM = pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
-		keySecret = corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: keySecretName, Namespace: userNamespace},
-			Type:       corev1.SecretTypeOpaque,
-			Data:       map[string][]byte{"key.pem": keyPEM},
-		}
-		if err := r.Create(ctx, &keySecret); err != nil {
-			return false, false, err
-		}
-	} else if err != nil {
+	// Stage 1: Verify namespace exists
+	if err := ensureNamespace(ctx, r, userNamespace); err != nil {
 		return false, false, err
-	} else {
-		keyPEM = keySecret.Data["key.pem"]
 	}
 
-	// 2. If kubeconfig already exists, return
-	var existingCfg corev1.Secret
-	if err := r.Get(ctx, types.NamespacedName{Name: cfgSecretName, Namespace: userNamespace}, &existingCfg); err == nil {
+	// Stage 2: Handle certificate rotation if needed
+	if err := handleCertificateRotation(ctx, r, cfgSecretName, csrName, username, duration); err != nil {
+		return false, false, err
+	}
+
+	// Stage 3: Ensure private key exists
+	keyPEM, err := ensurePrivateKey(ctx, r, keySecretName, userNamespace)
+	if err != nil {
+		return false, false, fmt.Errorf("failed to ensure private key: %w", err)
+	}
+
+	// Stage 4: Check if kubeconfig already exists (early return)
+	if kubeconfigExists(ctx, r, cfgSecretName, userNamespace) {
 		return false, false, nil
 	}
 
-	// 3. CSR from key
+	// Stage 5: Ensure signed certificate (handles CSR lifecycle)
+	signedCert, requeue, err := ensureSignedCertificate(ctx, r, user, csrName, keyPEM, duration, signerName)
+	if err != nil {
+		return false, false, fmt.Errorf("failed to ensure signed certificate: %w", err)
+	}
+	if requeue {
+		return false, true, nil
+	}
+
+	// Stage 6: Calculate certificate metadata (expiry, renewal time)
+	statusChanged, err := calculateCertificateMetadata(ctx, user, signedCert)
+	if err != nil {
+		return false, false, fmt.Errorf("failed to calculate certificate metadata: %w", err)
+	}
+
+	// Stage 7: Persist kubeconfig secret
+	if err := persistKubeconfig(ctx, r, user, signedCert, keyPEM); err != nil {
+		return false, false, fmt.Errorf("failed to persist kubeconfig: %w", err)
+	}
+
+	return statusChanged, false, nil
+}
+
+// handleCertificateRotation checks if certificate needs rotation and cleans up resources if needed
+func handleCertificateRotation(ctx context.Context, r client.Client, cfgSecretName, csrName, username string, duration time.Duration) error {
+	rotationThreshold := getRotationThreshold(duration)
+	needsRotation, err := checkCertificateRotation(ctx, r, cfgSecretName, rotationThreshold)
+	if err != nil {
+		return fmt.Errorf("failed to check certificate rotation: %w", err)
+	}
+
+	if !needsRotation {
+		return nil
+	}
+
+	logger := logf.FromContext(ctx)
+	logger.Info("Certificate needs rotation, cleaning up existing resources", "user", username)
+	if err := cleanupCertificateResources(ctx, r, cfgSecretName, csrName); err != nil {
+		return fmt.Errorf("failed to cleanup certificate resources: %w", err)
+	}
+
+	return nil
+}
+
+// kubeconfigExists checks if a kubeconfig secret already exists
+func kubeconfigExists(ctx context.Context, r client.Client, cfgSecretName, namespace string) bool {
+	var existingCfg corev1.Secret
+	err := r.Get(ctx, types.NamespacedName{Name: cfgSecretName, Namespace: namespace}, &existingCfg)
+	return err == nil
+}
+
+// ensureNamespace verifies that the target namespace exists
+func ensureNamespace(ctx context.Context, r client.Client, namespace string) error {
+	var ns corev1.Namespace
+	if err := r.Get(ctx, types.NamespacedName{Name: namespace}, &ns); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("target namespace '%s' does not exist - please create it before deploying KubeUser or use Helm with --create-namespace", namespace)
+		}
+		return fmt.Errorf("failed to verify namespace '%s': %w", namespace, err)
+	}
+	return nil
+}
+
+// ensurePrivateKey loads an existing private key or generates a new 2048-bit RSA key and persists it
+// Returns the key PEM bytes
+func ensurePrivateKey(ctx context.Context, r client.Client, name, namespace string) ([]byte, error) {
+	logger := logf.FromContext(ctx)
+
+	var keySecret corev1.Secret
+	err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, &keySecret)
+
+	if err == nil {
+		// Key already exists
+		keyPEM := keySecret.Data["key.pem"]
+		if keyPEM == nil {
+			return nil, fmt.Errorf("key secret exists but key.pem data is missing")
+		}
+		logger.Info("Using existing private key", "secret", name)
+		return keyPEM, nil
+	}
+
+	if !apierrors.IsNotFound(err) {
+		return nil, fmt.Errorf("failed to get key secret: %w", err)
+	}
+
+	// Generate new key
+	logger.Info("Generating new private key", "secret", name)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate RSA key: %w", err)
+	}
+
+	keyPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(key),
+	})
+
+	keySecret = corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{"key.pem": keyPEM},
+	}
+
+	if err := r.Create(ctx, &keySecret); err != nil {
+		return nil, fmt.Errorf("failed to create key secret: %w", err)
+	}
+
+	logger.Info("Successfully created private key secret", "secret", name)
+	return keyPEM, nil
+}
+
+// ensureSignedCertificate handles the entire CSR lifecycle:
+// - Check for existing CSR
+// - Create CSR if missing
+// - Auto-approve CSR if not approved
+// - Wait for signed certificate
+// Returns (signedCert []byte, requeue bool, error)
+func ensureSignedCertificate(ctx context.Context, r client.Client, user *authv1alpha1.User, csrName string, keyPEM []byte, duration time.Duration, signerName string) ([]byte, bool, error) {
+	username := user.Name
+
+	// Generate CSR from private key
 	csrPEM, err := csrFromKey(username, keyPEM)
 	if err != nil {
-		return false, false, err
+		return nil, false, fmt.Errorf("failed to generate CSR from key: %w", err)
 	}
 
-	// 4. Create/get CSR
+	// Get or create CSR
+	csr, err := getOrCreateCSR(ctx, r, csrName, username, csrPEM, duration, signerName)
+	if err != nil {
+		return nil, false, err
+	}
+	if csr == nil {
+		// CSR was just created, requeue
+		return nil, true, nil
+	}
+
+	// Approve CSR if needed
+	if needsApproval(csr) {
+		if err := approveCSR(ctx, r, csr, csrName); err != nil {
+			return nil, false, err
+		}
+		return nil, true, nil
+	}
+
+	// Wait for certificate if not ready
+	if len(csr.Status.Certificate) == 0 {
+		logger := logf.FromContext(ctx)
+		logger.Info("Waiting for certificate to be issued", "csr", csrName)
+		return nil, true, nil
+	}
+
+	logger := logf.FromContext(ctx)
+	logger.Info("Certificate issued successfully", "csr", csrName, "certLength", len(csr.Status.Certificate))
+	return csr.Status.Certificate, false, nil
+}
+
+// getOrCreateCSR retrieves an existing CSR or creates a new one
+// Returns (csr, error) where csr is nil if a new CSR was just created
+func getOrCreateCSR(ctx context.Context, r client.Client, csrName, username string, csrPEM []byte, duration time.Duration, signerName string) (*certv1.CertificateSigningRequest, error) {
+	logger := logf.FromContext(ctx)
+
 	var csr certv1.CertificateSigningRequest
-	err = r.Get(ctx, types.NamespacedName{Name: csrName}, &csr)
-	if apierrors.IsNotFound(err) {
-		// Convert duration to seconds for CSR
-		expirationSeconds := int32(duration.Seconds())
+	err := r.Get(ctx, types.NamespacedName{Name: csrName}, &csr)
 
-		csr = certv1.CertificateSigningRequest{
-			ObjectMeta: metav1.ObjectMeta{Name: csrName, Labels: map[string]string{"auth.openkube.io/user": username}},
-			Spec: certv1.CertificateSigningRequestSpec{
-				Request:           csrPEM,
-				Usages:            []certv1.KeyUsage{certv1.UsageClientAuth},
-				SignerName:        signerName, // Use configurable signer for managed K8s support
-				ExpirationSeconds: &expirationSeconds,
-			},
-		}
-		if err := r.Create(ctx, &csr); err != nil {
-			return false, false, err
-		}
-		return false, true, nil
-	} else if err != nil {
-		return false, false, err
+	if err == nil {
+		return &csr, nil
 	}
 
-	// 5. Approve CSR if not approved
-	approved := false
+	if !apierrors.IsNotFound(err) {
+		return nil, fmt.Errorf("failed to get CSR: %w", err)
+	}
+
+	// Create new CSR
+	logger.Info("Creating new CSR", "csr", csrName, "user", username)
+	expirationSeconds := int32(duration.Seconds())
+
+	newCSR := certv1.CertificateSigningRequest{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   csrName,
+			Labels: map[string]string{"auth.openkube.io/user": username},
+		},
+		Spec: certv1.CertificateSigningRequestSpec{
+			Request:           csrPEM,
+			Usages:            []certv1.KeyUsage{certv1.UsageClientAuth},
+			SignerName:        signerName,
+			ExpirationSeconds: &expirationSeconds,
+		},
+	}
+
+	if err := r.Create(ctx, &newCSR); err != nil {
+		return nil, fmt.Errorf("failed to create CSR: %w", err)
+	}
+
+	logger.Info("CSR created, requeuing for approval", "csr", csrName)
+	return nil, nil
+}
+
+// needsApproval checks if a CSR needs approval
+func needsApproval(csr *certv1.CertificateSigningRequest) bool {
 	for _, c := range csr.Status.Conditions {
 		if c.Type == certv1.CertificateApproved && c.Status == corev1.ConditionTrue {
-			approved = true
+			return false
 		}
 	}
-	if !approved {
-		csr.Status.Conditions = append(csr.Status.Conditions, certv1.CertificateSigningRequestCondition{
-			Type:           certv1.CertificateApproved,
-			Status:         corev1.ConditionTrue,
-			Reason:         "AutoApproved",
-			Message:        "Approved by kubeuser-operator",
-			LastUpdateTime: metav1.Now(),
-		})
-		if err := r.SubResource("approval").Update(ctx, &csr); err != nil {
-			return false, false, err
-		}
-		return false, true, nil
-	}
+	return true
+}
 
-	// 6. Wait for cert
-	if len(csr.Status.Certificate) == 0 {
-		return false, true, nil
-	}
-	signedCert := csr.Status.Certificate
-
-	// 7. Cluster CA
-	caDataB64, err := getClusterCABase64(ctx, r)
-	if err != nil {
-		return false, false, err
-	}
-
-	// 8. API server URL
-	apiServer := os.Getenv("KUBERNETES_API_SERVER")
-	if apiServer == "" {
-		apiServer = "https://kubernetes.default.svc"
-	}
-
-	// 9. Kubeconfig
-	kcfg := buildCertKubeconfig(apiServer, caDataB64,
-		base64.StdEncoding.EncodeToString(signedCert),
-		base64.StdEncoding.EncodeToString(keyPEM),
-		username)
-
-	// 9.5. Extract certificate expiry time
+// approveCSR auto-approves a CSR
+func approveCSR(ctx context.Context, r client.Client, csr *certv1.CertificateSigningRequest, csrName string) error {
 	logger := logf.FromContext(ctx)
-	logger.Info("Extracting certificate expiry", "certLength", len(signedCert))
-	logger.Info("Certificate data preview", "first20bytes", string(signedCert[:helpers.Min(20, len(signedCert))]))
+	logger.Info("Auto-approving CSR", "csr", csrName)
 
-	// Try to extract certificate expiry with proper format detection
-	certExpiryTime, err := extractCertificateExpiryWithFormatDetection(signedCert)
+	csr.Status.Conditions = append(csr.Status.Conditions, certv1.CertificateSigningRequestCondition{
+		Type:           certv1.CertificateApproved,
+		Status:         corev1.ConditionTrue,
+		Reason:         "AutoApproved",
+		Message:        "Approved by kubeuser-operator",
+		LastUpdateTime: metav1.Now(),
+	})
+
+	if err := r.SubResource("approval").Update(ctx, csr); err != nil {
+		return fmt.Errorf("failed to approve CSR: %w", err)
+	}
+
+	logger.Info("CSR approved, requeuing for certificate issuance", "csr", csrName)
+	return nil
+}
+
+// calculateCertificateMetadata extracts certificate expiry time and calculates NextRenewalAt
+// Updates user.Status fields in memory (does not persist to etcd)
+// Returns (statusChanged bool, error)
+func calculateCertificateMetadata(ctx context.Context, user *authv1alpha1.User, certData []byte) (bool, error) {
+	logger := logf.FromContext(ctx)
+
+	// Extract certificate expiry time
+	logger.Info("Extracting certificate expiry", "certLength", len(certData))
+	certExpiryTime, err := extractCertificateExpiryWithFormatDetection(certData)
 	if err != nil {
-		return false, false, fmt.Errorf("failed to extract certificate expiry: %w", err)
+		return false, fmt.Errorf("failed to extract certificate expiry: %w", err)
 	}
 	logger.Info("Successfully extracted certificate expiry", "expiry", certExpiryTime)
 
-	// Update user status IN MEMORY with actual certificate expiry and renewal time
-	// The orchestrator will persist this to etcd via the single Status().Update() call
 	// SEMANTIC PROTECTION: Only set statusChanged = true if values actually differ
 	statusChanged := false
 
@@ -228,23 +348,27 @@ func EnsureCertKubeconfigWithDuration(ctx context.Context, r client.Client, user
 
 	// Only set NextRenewalAt if auto-renewal is enabled
 	var newNextRenewalAt *metav1.Time
-	autoRenew := user.Spec.Auth.AutoRenew != nil && *user.Spec.Auth.AutoRenew
+	autoRenew := user.Spec.Auth != nil && user.Spec.Auth.AutoRenew != nil && *user.Spec.Auth.AutoRenew
 	if autoRenew {
-		nextRenewal := calculateNextRenewal(issuedAt, certExpiryTime, user.Spec.Auth.RenewBefore)
+		var renewBefore *metav1.Duration
+		if user.Spec.Auth != nil {
+			renewBefore = user.Spec.Auth.RenewBefore
+		}
+
+		nextRenewal := calculateNextRenewal(issuedAt, certExpiryTime, renewBefore)
 		newNextRenewalAt = &nextRenewal
 
 		logger.Info("Certificate times calculated",
 			"expiry", certExpiryTime.Format(time.RFC3339),
 			"nextRenewalAt", nextRenewal.Format(time.RFC3339),
-			"renewBefore", user.Spec.Auth.RenewBefore)
+			"renewBefore", renewBefore)
 	} else {
 		// Explicitly clear the field if auto-renewal is disabled
 		newNextRenewalAt = nil
 
 		logger.Info("Certificate times calculated",
 			"expiry", certExpiryTime.Format(time.RFC3339),
-			"nextRenewalAt", "disabled (autoRenew=false)",
-			"renewBefore", user.Spec.Auth.RenewBefore)
+			"nextRenewalAt", "disabled (autoRenew=false)")
 	}
 
 	// Update NextRenewalAt if changed (semantic comparison)
@@ -263,14 +387,53 @@ func EnsureCertKubeconfigWithDuration(ctx context.Context, r client.Client, user
 		logger.Info("NextRenewalAt changed", "old", oldStr, "new", newStr)
 	}
 
-	// 10. Save kubeconfig
-	cfgSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: cfgSecretName, Namespace: userNamespace},
-		Type:       corev1.SecretTypeOpaque,
-		Data:       map[string][]byte{"config": kcfg},
+	return statusChanged, nil
+}
+
+// persistKubeconfig gathers CA data, API URL, and builds/saves the final kubeconfig secret
+func persistKubeconfig(ctx context.Context, r client.Client, user *authv1alpha1.User, certPEM, keyPEM []byte) error {
+	logger := logf.FromContext(ctx)
+	username := user.Name
+	userNamespace := helpers.GetKubeUserNamespace()
+	cfgSecretName := fmt.Sprintf("%s-kubeconfig", username)
+
+	// Get cluster CA certificate
+	caDataB64, err := getClusterCABase64(ctx, r)
+	if err != nil {
+		return fmt.Errorf("failed to get cluster CA: %w", err)
 	}
-	err = helpers.CreateOrUpdate(ctx, r, cfgSecret)
-	return statusChanged, false, err
+
+	// Get API server URL
+	apiServer := os.Getenv("KUBERNETES_API_SERVER")
+	if apiServer == "" {
+		apiServer = "https://kubernetes.default.svc"
+	}
+
+	// Build kubeconfig
+	kcfg := buildCertKubeconfig(
+		apiServer,
+		caDataB64,
+		base64.StdEncoding.EncodeToString(certPEM),
+		base64.StdEncoding.EncodeToString(keyPEM),
+		username,
+	)
+
+	// Create or update kubeconfig secret
+	cfgSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      cfgSecretName,
+			Namespace: userNamespace,
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{"config": kcfg},
+	}
+
+	if err := helpers.CreateOrUpdate(ctx, r, cfgSecret); err != nil {
+		return fmt.Errorf("failed to create/update kubeconfig secret: %w", err)
+	}
+
+	logger.Info("Successfully persisted kubeconfig", "secret", cfgSecretName)
+	return nil
 }
 
 func csrFromKey(username string, keyPEM []byte) ([]byte, error) {

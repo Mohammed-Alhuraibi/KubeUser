@@ -116,17 +116,17 @@ authDefaults:
   # Default certificate TTL (Time To Live)
   # Production standard: 2160h (90 days / 3 months)
   # This value is written into User specs that don't explicitly set a TTL
-  ttl: "24h"
+  ttl: "2160h"
   
   # Default auto-renewal behavior
   # Production standard: true (certificates renew automatically before expiry)
   # This value is written into User specs that don't explicitly set autoRenew
-  autoRenew: false
+  autoRenew: true
 
 # Environment variables
 env:
   # Kubernetes API server endpoint
-  KUBERNETES_API_SERVER: "https://127.0.0.1:42541"
+  KUBERNETES_API_SERVER: "https://kubernetes.default.svc"
   # Kubernetes cluster domain (default: cluster.local)
   # Override this if your cluster uses a different domain
   CLUSTER_DOMAIN: "cluster.local"
@@ -151,6 +151,5 @@ crds:
   install: true
 
 # Common labels (following user preference)
-commonLabels:
-  environment: test
+commonLabels: {}
 
