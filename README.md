@@ -55,25 +55,24 @@ kubectl get pods -n kubeuser
 When deleting a User:
 - RBAC bindings removed immediately (no permissions)
 - secrets deleted
-- Certificated remain valid until expiry (~1 year)
+- Certificated remain valid until expiry
 
-#### 🚧 implemented Features
-- [X] Declarative User CRD with status tracking and finalizers
-- [X] Automatic client certificate generation via Kubernetes CSR API
-- [X] Stateful certificate rotation with Shadow Secret pattern
-- [X] Atomic secret updates with automatic rollback
-- [X] Resumable operations across controller restarts
-- [X] Certificate rotation 30 days before expiry
-- [X] Kubeconfig generation stored as Kubernetes secrets
-- [X] Namespace-scoped Role bindings (Role + RoleBinding)
-- [X] Namespace-scoped ClusterRole bindings (ClusterRole + RoleBinding)
-- [X] Dynamic RBAC reconciliation with automatic cleanup
-- [X] Admission webhook validation with TLS/HTTPS
-- [X] Role/ClusterRole existence validation
-- [X] High availability with leader election
-- [X] Prometheus metrics endpoint (HTTPS :8443) with RBAC protection
-- [X] Health probes (liveness and readiness)
-- [X] Helm chart and Kustomize deployment options
+#### ✅ Implemented Features
+- [x] **Declarative User CRD**: Complete with status tracking, conditions, and finalizers for clean resource lifecycles.
+- [x] **Hardened Auth Model**: Transitioned to pointer-based API requiring explicit authentication types.
+- [x] **Zero-Drift Defaults**: Admission webhooks persist production defaults (TTL/AutoRenew) directly into the User spec.
+- [x] **Automatic Certificate Generation**: Seamless integration with the Kubernetes CSR API for x509 credentials.
+- [x] **Stateful Rotation Engine**: Resumable, multi-step rotation using the **Shadow Secret** pattern for high availability.
+- [x] **Standardized Renewal Timing**: Renewal is triggered automatically when **33% (1/3)** of the certificate's total lifetime remains (following cert-manager standards).
+- [x] **Configurable Safety Floors**: Enforced **24-hour minimum TTL** and a **50% renewal cap** via Validating Webhooks to prevent aggressive loops.
+- [x] **Guaranteed Lifetime Buffer**: Implemented a mandatory **5-minute safety floor** to ensure certificates remain valid during the final rotation steps.
+- [x] **Managed K8s Support**: Fully configurable CSR signers for EKS, GKE, and vanilla clusters.
+- [x] **Atomic Secret Updates**: Zero-downtime "flip" from old to new credentials only after successful verification.
+- [x] **Dynamic RBAC Reconciliation**: Automatic management of RoleBindings and ClusterRoleBindings based on CRD spec.
+- [x] **Production-Grade Webhooks**: TLS-secured Mutating and Validating webhooks with cert-manager CA injection.
+- [x] **Helm Environmental Bridge**: Synchronized Helm values with operator logic via environment variable injection.
+- [x] **Enterprise Observability**: Prometheus metrics, health probes (8081), and structured logging with controller-runtime.
+- [x] **High Availability**: Leader election enabled by default for multi-replica controller deployments.
 
 #### 🚧 Planned Features
 - [ ] User Groups (UserGroup CRD)
