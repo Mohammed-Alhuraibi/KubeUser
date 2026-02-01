@@ -71,14 +71,14 @@ When deleting a User:
 - [x] **Dynamic RBAC Reconciliation**: Automatic management of RoleBindings and ClusterRoleBindings based on CRD spec.
 - [x] **Production-Grade Webhooks**: TLS-secured Mutating and Validating webhooks with cert-manager CA injection.
 - [x] **Helm Environmental Bridge**: Synchronized Helm values with operator logic via environment variable injection.
-- [x] **Enterprise Observability**: Prometheus metrics, health probes (8081), and structured logging with controller-runtime.
+- [x] **Basic Observability**: Health probes (8081) and structured logging with controller-runtime.
 - [x] **High Availability**: Leader election enabled by default for multi-replica controller deployments.
 
 #### 🚧 Planned Features
 - [ ] User Groups (UserGroup CRD)
 - [ ] Predefined role templates library
-- [ ] Certificate revocation mechanism
 - [ ] OIDC, LDAP/AD, and SSO integration
+- [ ] Prometheus custom metrics for operational visibility
 - [ ] Enhanced metrics with Grafana dashboards and Prometheus alerts
 - [ ] CLI tool and Web UI
 
@@ -238,7 +238,7 @@ metadata:
   name: alice
 spec:
   auth:
-    type: x509        # REQUIRED: must be 'x509' or 'oidc'
+    type: x509        # REQUIRED: currently only 'x509' is supported (oidc planned)
     ttl: "72h"        # Optional: 3 days (default: 2160h = 3 months)
     autoRenew: false  # Optional: disable auto-renewal (default: true)
   roles:
@@ -375,7 +375,7 @@ spec:
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `spec.auth` | `AuthSpec` | **Yes** | Authentication configuration (MANDATORY - cannot be omitted) |
-| `spec.auth.type` | `string` | **Yes** | Authentication method: `x509` or `oidc` (MANDATORY - no default) |
+| `spec.auth.type` | `string` | **Yes** | Authentication method: currently only `x509` supported (MANDATORY - no default). OIDC planned for future. |
 | `spec.auth.ttl` | `string` | No | Certificate lifetime (default: `2160h` = 3 months). Default written by webhook at creation. |
 | `spec.auth.autoRenew` | `boolean` | No | Enable automatic certificate renewal (default: `true`). Default written by webhook at creation. |
 | `spec.auth.renewBefore` | `string` | No | Renew this duration before expiry (overrides 33% rule) |
