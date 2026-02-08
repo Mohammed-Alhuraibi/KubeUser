@@ -1,15 +1,23 @@
 # KubeUser
 
-Lightweight Kubernetes-native user management operator that simplifies user authentication and authorization through declarative custom resources.
+KubeUser is a Kubernetes-native way to manage users, certificates, RBAC, and kubeconfigs declaratively — without running an external identity provider.
 
 ## Overview
 
-KubeUser automates Kubernetes user management through declarative custom resources. It handles certificate generation, RBAC binding, and kubeconfig creation automatically.
+Managing Kubernetes access often means manually creating kubeconfigs, handling certificates, and keeping RBAC in sync. This quickly becomes error-prone, hard to audit, and unfriendly to GitOps workflows.
 
-### Why KubeUser?
+KubeUser solves this by managing Kubernetes users through declarative custom resources. It automatically generates and rotates certificates, applies RBAC bindings, and produces ready-to-use kubeconfigs using native Kubernetes APIs.
 
-Kubernetes-native user management - no certificate handling , no Keycloak required.
+## Why KubeUser?
 
+KubeUser is designed for teams that want simple, auditable Kubernetes access control without introducing a full IAM or OIDC stack.  
+No manual certificate handling. No Keycloak. Just Kubernetes.
+
+## Who is KubeUser for?
+
+KubeUser is intended for small teams and self-managed Kubernetes clusters that want a Kubernetes-native, GitOps-friendly way to manage access.
+
+It is **not** a replacement for enterprise identity providers or OIDC-based authentication and is not designed for large organizations with centralized IAM requirements.
 
 ### Architecture Overview
 
@@ -46,6 +54,8 @@ helm install kubeuser kubeuser/kubeuser --create-namespace -n kubeuser \
 # verify installation
 kubectl get pods -n kubeuser
 ```
+
+[Create your first User](#basic-user-creation)
 
 **Important**: The controller requires a namespace for storing user certificates. Use `--create-namespace` or install into an existing namespace. The controller will NOT automatically create namespaces for GitOps compatibility.
 
